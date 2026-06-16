@@ -1,0 +1,25 @@
+# macOS
+.DS_Store
+
+# Xcode / build output
+build/
+DerivedData/
+*.xcuserstate
+*.xcuserdatad
+
+# Xcode per-user state (not shared)
+xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Misc
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
