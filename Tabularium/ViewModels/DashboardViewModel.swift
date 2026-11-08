@@ -65,6 +65,7 @@ class DashboardViewModel: ObservableObject {
         let name: String
         let amount: Double      // total spent in this category this period
         let fraction: Double    // amount ÷ period total, in 0...1 (for the bar width)
+        let rows: [TransactionRow]   // the individual charges in this category (for the dropdown)
     }
 
     // `@Published` = "when this changes, refresh any View watching it".
@@ -205,11 +206,18 @@ class DashboardViewModel: ObservableObject {
         // months ago or is months ahead. We also tally each category as we go.
         var built: [TransactionRow] = []
         var categorySums: [String: Double] = [:]
+        // Rows grouped by categoryId, so the chart can expand each category to show
+        // its individual charges.
+        var categoryRows: [String: [TransactionRow]] = [:]
 
         for tx in RealmService.shared.objects(Transaction.self) where tx.cardId == card.id {
             let emoji = categoryMap[tx.categoryId]?.emoji ?? "·"
             let categoryName = categoryMap[tx.categoryId]?.name ?? "Uncategorized"
 
+            // Decide this transaction's contribution to the period (a monthly part for
+            // an MSI purchase, or the full amount for a one-time charge), then build a
+            // single row we file into all three buckets below.
+            let row: TransactionRow
             if tx.installments >= 2 {
                 // Which installment, if any, falls in the visible period? `offset` 0 is
                 // the purchase cycle (1/N), 1 is the next cycle (2/N), and so on.
@@ -222,7 +230,7 @@ class DashboardViewModel: ObservableObject {
                 // month, so it sorts and day-groups naturally within the period.
                 let shownDate = calendar.date(byAdding: .month, value: offset, to: tx.date) ?? tx.date
 
-                built.append(TransactionRow(
+                row = TransactionRow(
                     id: tx.id,
                     emoji: emoji,
                     category: categoryName,
@@ -230,12 +238,11 @@ class DashboardViewModel: ObservableObject {
                     amount: monthly,
                     date: shownDate,
                     installmentLabel: "\(offset + 1)/\(tx.installments)"
-                ))
-                categorySums[tx.categoryId, default: 0] += monthly
+                )
             } else {
                 // Normal one-time charge: include only if it falls inside the period.
                 guard tx.date >= start && tx.date < end else { continue }
-                built.append(TransactionRow(
+                row = TransactionRow(
                     id: tx.id,
                     emoji: emoji,
                     category: categoryName,
@@ -243,9 +250,12 @@ class DashboardViewModel: ObservableObject {
                     amount: tx.amount,
                     date: tx.date,
                     installmentLabel: nil
-                ))
-                categorySums[tx.categoryId, default: 0] += tx.amount
+                )
             }
+
+            built.append(row)
+            categorySums[tx.categoryId, default: 0] += row.amount
+            categoryRows[tx.categoryId, default: []].append(row)
         }
 
         rows = built.sorted { $0.date < $1.date }   // oldest first (earliest on top)
@@ -274,10 +284,53 @@ class DashboardViewModel: ObservableObject {
                 emoji: category?.emoji ?? "·",
                 name: category?.name ?? "Uncategorized",
                 amount: amount,
-                fraction: total != 0 ? amount / total : 0
+                fraction: total != 0 ? amount / total : 0,
+                rows: (categoryRows[categoryId] ?? []).sorted { $0.date < $1.date }
             )
         }
         .sorted { $0.amount > $1.amount }   // biggest spend first
+    }
+
+    // MARK: - CSV export
+
+    /// Builds a CSV of the rows currently shown (the selected card + visible period,
+    /// installments included exactly as displayed). No AI — a plain dump of what's on
+    /// screen, for spreadsheets or accounting.
+    func exportCSVText() -> String {
+        let dateFormatter = DateFormatter()
+        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+        dateFormatter.dateFormat = "yyyy-MM-dd"
+
+        var lines = ["Date,Description,Category,Installment,Amount"]
+        for row in rows {
+            let fields = [
+                dateFormatter.string(from: row.date),
+                row.description,
+                row.category,
+                row.installmentLabel ?? "",
+                // Plain dot-decimal number (no symbol/grouping) for spreadsheets.
+                String(format: "%.2f", row.amount),
+            ]
+            lines.append(fields.map(Self.csvEscape).joined(separator: ","))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// A suggested file name like "BBVA Platinum — June 2026.csv", with characters
+    /// that aren't safe in file names stripped out.
+    var exportFileName: String {
+        let cardName = selectedCard?.name ?? "Tabularium"
+        let raw = "\(cardName) — \(periodLabel)"
+        let cleaned = raw.components(separatedBy: CharacterSet(charactersIn: "/\\:*?\"<>|"))
+            .joined(separator: " ")
+        return cleaned + ".csv"
+    }
+
+    /// Wraps a field in quotes (and doubles internal quotes) when it contains a comma,
+    /// quote, or newline — the standard CSV escaping rules.
+    private static func csvEscape(_ field: String) -> String {
+        guard field.contains(",") || field.contains("\"") || field.contains("\n") else { return field }
+        return "\"" + field.replacingOccurrences(of: "\"", with: "\"\"") + "\""
     }
 
     /// Maps a date to a monotonic "cycle ordinal" (a `year*12 + month` integer) for

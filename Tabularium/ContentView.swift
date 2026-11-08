@@ -40,6 +40,10 @@ private struct MainView: View {
             }
             .navigationSplitViewColumnWidth(min: 160, ideal: 180)
             .navigationTitle("Tabularium")
+            // Pin the LLM connection light to the very bottom of the sidebar.
+            .safeAreaInset(edge: .bottom) {
+                LLMStatusBadge()
+            }
         } detail: {
             // The right-hand pane shows a different view depending on selection.
             switch selection {

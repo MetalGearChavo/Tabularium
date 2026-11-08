@@ -4,56 +4,92 @@
 
 ## Folder Structure
 
+Current layout (✅ = exists today, ⏳ = planned, comes with the import flow):
+
 ```
 Tabularium/
-├── TabulariumApp.swift               # @main entry point
-├── ContentView.swift                 # root navigation shell
+├── TabulariumApp.swift               # @main entry point                      ✅
+├── ContentView.swift                 # root nav shell + LLM status footer      ✅
+├── Tabularium.entitlements           # sandbox: files read-write, network      ✅
 │
 ├── Models/                           # Realm objects — pure data, no logic
-│   ├── Account.swift
-│   ├── Statement.swift
-│   ├── Transaction.swift
-│   ├── Category.swift
-│   └── Classification.swift
+│   ├── Card.swift                    # the account/card (name, last 4, corte)  ✅
+│   ├── Statement.swift               # billing period (used by import)         ✅
+│   ├── Transaction.swift             # a charge (incl. installments/MSI)        ✅
+│   ├── Category.swift                                                          ✅
+│   └── MerchantAlias.swift           # user-taught "messy name" → clean         ✅
+│                                      # name + default category rule
 │
-├── ViewModels/                       # Business logic, coordinates Models and Services
-│   ├── DashboardViewModel.swift
-│   ├── ImportViewModel.swift
-│   └── ReviewViewModel.swift
+├── ViewModels/                       # Business logic, coordinates Models/Services
+│   ├── DashboardViewModel.swift                                               ✅
+│   ├── OnboardingViewModel.swift                                              ✅
+│   └── ImportViewModel.swift         # PDF → LLM pipeline state for the review  ✅
 │
-├── Views/                            # SwiftUI views, one per screen
+├── Views/                            # SwiftUI views, grouped by screen
 │   ├── Dashboard/
-│   │   └── DashboardView.swift
-│   ├── Import/
-│   │   └── ImportView.swift
-│   ├── Review/
-│   │   └── ReviewView.swift
-│   ├── Onboarding/
-│   │   └── OnboardingView.swift
+│   │   ├── DashboardView.swift       # nav, header, list/chart, day groups,     ✅
+│   │   │                             # drag & drop PDF import entry point
+│   │   ├── AddTransactionSheet.swift                                          ✅
+│   │   └── EditTransactionSheet.swift                                         ✅
+│   ├── Import/ImportView.swift       # unused placeholder — import is          ⏳
+│   │                                 # triggered by dropping onto Dashboard
+│   ├── Review/ReviewView.swift       # editable list of parsed transactions,   ✅
+│   │                                 # card picker, Save All → Realm
+│   ├── Onboarding/OnboardingView.swift                                        ✅
 │   └── Settings/
-│       └── SettingsView.swift
+│       ├── SettingsView.swift                                                 ✅
+│       └── EditCardSheet.swift                                                ✅
 │
 ├── Services/                         # External integrations — no UI, no ViewModels
-│   ├── RealmService.swift            # All Realm reads and writes
-│   ├── PDFService.swift              # PDFKit text extraction
-│   └── OllamaService.swift           # HTTP calls to Ollama API
+│   ├── RealmService.swift            # all Realm reads/writes + schema version  ✅
+│   └── PDFService.swift              # PDFKit text extraction + Vision OCR      ✅
+│                                      # fallback for scanned/image-only PDFs
 │
-├── Components/                       # Reusable SwiftUI pieces used across views
-│   └── TransactionRow.swift
+├── AI/                               # LLM integration (cohesive module)
+│   ├── LLMConnection.swift           # connection status + LLMConnectionMonitor ✅
+│   │                                 # (live ping) + the sidebar badge view
+│   ├── ParsedTransaction.swift       # LLM output before user review/save       ✅
+│   ├── CategoryOption.swift          # thread-safe Category snapshot for the    ✅
+│   │                                 # import pipeline (see "Realm Conventions")
+│   ├── MerchantAliasOption.swift     # thread-safe MerchantAlias snapshot,      ✅
+│   │                                 # same reasoning as CategoryOption
+│   ├── MerchantAliasMatcher.swift    # applies MerchantAlias rules to parsed    ✅
+│   │                                 # transactions (rewrite name + category)
+│   ├── StatementChunker.swift        # splits statement text into small batches ✅
+│   │                                 # so the LLM tracks fewer items per call
+│   ├── import_prompt.md              # the LLM's system prompt (bundled)        ✅
+│   └── LLMService.swift              # OpenAI-compatible HTTP calls + parsing   ✅
+│
+├── Export/
+│   └── CSVDocument.swift             # FileDocument for CSV export             ✅
 │
 └── Extensions/                       # Swift extensions on built-in types
-    ├── Date+Formatting.swift
-    └── Double+Currency.swift
+    ├── Character+Emoji.swift         # isEmoji (category emoji input)          ✅
+    ├── Date+Formatting.swift         # period labels + billingPeriod()         ✅
+    ├── Double+Currency.swift         # "$1,234.56" formatting                  ✅
+    └── String+Amount.swift           # amount-field input filtering            ✅
 ```
+
+Notes on conventions vs. reality:
+- The AI service is named **`LLMService`** (not `OllamaService`): the backend is swappable via
+  base URL, so the name stays backend-agnostic. It lives in `AI/` with the rest of the LLM code.
+- `PDFService` never touches an LLM/vision model for the common case — `PDFKit`'s text layer
+  covers nearly all bank e-statements. Vision's OCR (`VNRecognizeTextRequest`) is only a
+  fallback for scanned/image-only PDFs, and is itself a local, non-AI, built-in OCR engine.
+- There's no `Components/` folder yet — row views live in their screen file (e.g. the chart's
+  charge rows in `DashboardView.swift`, or `ReviewView`'s own row view). Promote a view to
+  `Components/` only when it's shared across screens. `TransactionRow` is nested in
+  `DashboardViewModel`; `ParsedTransaction` gets its own file in `AI/` since both `LLMService`
+  and `ReviewView` need it.
 
 ### Layer responsibilities
 
 **Models** are Realm database objects. They define what gets stored and in what shape. No logic, no networking, no formatting — just data and its relationships.
 
 **Services** are the lowest layer. Each service knows how to talk to exactly one external thing:
-- `RealmService` — opens the database, reads, writes, deletes
-- `PDFService` — takes a file URL, returns raw extracted text using PDFKit
-- `OllamaService` — sends HTTP requests to `localhost:11434`, returns categorized results
+- `RealmService` — opens the database, reads, writes, deletes *(built)*
+- `LLMService` — sends OpenAI-compatible HTTP requests to the LLM (Ollama locally), returns parsed/categorized transactions *(built; lives in `AI/`)*
+- `PDFService` — takes a file URL, returns raw extracted text via PDFKit, with a Vision OCR fallback for scanned PDFs *(built)*
 
 Services have no knowledge of ViewModels or Views.
 
@@ -297,21 +333,30 @@ import RealmSwift
 
 class Transaction: Object, Identifiable {
     @Persisted(primaryKey: true) var id: String = UUID().uuidString
+    @Persisted var statementId: String = ""   // foreign keys: hold the related id, not the object
+    @Persisted var cardId: String = ""
     @Persisted var date: Date = Date()
     @Persisted var amount: Double = 0.0
     @Persisted var transactionDescription: String = ""  // avoid 'description' — shadows Object.description
-    @Persisted var reviewed: Bool = false
     @Persisted var categoryId: String = ""
-    @Persisted var classificationId: String = ""
-
-    // Back-link to parent
-    @Persisted(originProperty: "transactions") var statement: LinkingObjects<Statement>
+    @Persisted var reviewed: Bool = false
+    @Persisted var installments: Int = 1   // 1 = single charge; N ≥ 2 = monthly installments
 }
 ```
 
+- Relationships use plain foreign-key strings (`cardId`, `statementId`), not Realm
+  `LinkingObjects` — simpler to reason about and to pass around as detached values
 - Never name a property `description` — it shadows `CustomStringConvertible`
 - Always define a `primaryKey`
+- Bump `RealmService.schemaVersion` whenever you add/remove a `@Persisted` property
 - Open Realm on the main thread for UI reads, background thread for heavy writes
+- **Never carry a live `Object` (or a `RealmService.objects()` result) across an
+  `await` suspension point.** Realm objects are thread-confined; an `async`
+  function can resume on a different thread than it started on (this bit the
+  import pipeline for real — see `CategoryOption`), and touching a Realm object
+  from the wrong thread crashes with a Realm thread-verification error. Snapshot
+  what you need into a plain struct (copy out the fields you need) *before* any
+  `await`, and pass that struct through instead.
 
 ---
 

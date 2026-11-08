@@ -16,11 +16,21 @@ struct DashboardView: View {
     @State private var showingAddTransaction = false                  // is the Add sheet open?
     @State private var editingRow: DashboardViewModel.TransactionRow? // which row is being edited (nil = none)
     @State private var isDragTarget = false                           // is a file hovering over the list?
-    @State private var isProcessing = false                           // is the "processing" overlay showing?
-    @State private var processingFileName = ""
+    // Owns the PDF → LLM pipeline for a dropped statement (extraction, parsing,
+    // categorization). See `ImportViewModel`.
+    @StateObject private var importVM = ImportViewModel()
+    @State private var showingReview = false      // opens ReviewView once parsing succeeds
+    @State private var showingImportError = false // drives the failure alert
+    @State private var importTask: Task<Void, Never>?  // lets the overlay's Cancel stop an in-flight import
     // Day-group ids that are currently expanded in the list. Empty = all collapsed,
     // which is the default. `Set` gives fast membership checks.
     @State private var expandedDays: Set<String> = []
+
+    // CSV export state. We prepare the document + filename when the button is tapped,
+    // then present the system save panel via `.fileExporter`.
+    @State private var showingExporter = false
+    @State private var exportDocument = CSVDocument(text: "")
+    @State private var exportFileName = "export.csv"
 
     var body: some View {
         // `VStack` stacks children top-to-bottom. `spacing: 0` removes gaps.
@@ -40,11 +50,19 @@ struct DashboardView: View {
                     // a callback closure. `url, _` ignores the second argument (an error).
                     provider.loadFileRepresentation(forTypeIdentifier: UTType.pdf.identifier) { url, _ in
                         guard let url else { return }
+                        // The URL the system hands us is only guaranteed to exist for
+                        // the length of this closure, but we need it after an `await`
+                        // (inside the Task below) — so copy the bytes into our own temp
+                        // file first, then work from that stable copy.
+                        let tempURL = FileManager.default.temporaryDirectory
+                            .appendingPathComponent(UUID().uuidString)
+                            .appendingPathExtension("pdf")
+                        guard (try? FileManager.default.copyItem(at: url, to: tempURL)) != nil else { return }
+
                         // UI updates must run on the main thread; this callback may not,
                         // so we hop back onto it.
                         DispatchQueue.main.async {
-                            processingFileName = url.lastPathComponent
-                            isProcessing = true
+                            startImport(from: tempURL)
                         }
                     }
                     return true   // tell the system we accepted the drop
@@ -64,6 +82,20 @@ struct DashboardView: View {
         // Modifiers below apply to the whole VStack:
         .font(.system(.body, design: .monospaced))   // terminal-style font everywhere
         .toolbar {
+            // Export the current view to CSV. Prepares the document + filename, then
+            // opens the save panel. Disabled when there's nothing to export.
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    exportDocument = CSVDocument(text: vm.exportCSVText())
+                    exportFileName = vm.exportFileName
+                    showingExporter = true
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                }
+                .disabled(vm.rows.isEmpty)
+                .help("Export this period to CSV")
+            }
+
             // The "+" button in the window toolbar that opens the Add sheet.
             ToolbarItem(placement: .primaryAction) {
                 Button {
@@ -72,6 +104,15 @@ struct DashboardView: View {
                     Image(systemName: "plus")
                 }
             }
+        }
+        // The system save panel for the CSV export.
+        .fileExporter(
+            isPresented: $showingExporter,
+            document: exportDocument,
+            contentType: .commaSeparatedText,
+            defaultFilename: exportFileName
+        ) { _ in
+            // Nothing to do on completion; the system handles success/cancel.
         }
         // A "sheet" is a modal panel that slides up. This one shows the Add form.
         // The first closure runs on dismiss (reload so the new transaction appears);
@@ -87,14 +128,56 @@ struct DashboardView: View {
             EditTransactionSheet(transactionId: row.id)
         }
         .overlay {
-            if isProcessing {
-                ProcessingOverlay(fileName: processingFileName) {
-                    isProcessing = false
+            if importVM.isProcessing {
+                ProcessingOverlay(fileName: importVM.sourceFileName, progressLabel: importVM.progressLabel) {
+                    importTask?.cancel()
+                    importVM.isProcessing = false
                 }
             }
         }
+        // Opens once `startImport` finds transactions to review. On dismiss
+        // (Save or Cancel) we reset the import state and reload the dashboard,
+        // so any newly-saved transactions show up right away.
+        .sheet(isPresented: $showingReview, onDismiss: {
+            importVM.reset()
+            vm.load()
+        }) {
+            ReviewView(
+                parsed: importVM.parsedTransactions,
+                categories: RealmService.shared.objects(Category.self),
+                cards: vm.cards,
+                defaultCardId: vm.selectedCard?.id ?? "",
+                sourceFileName: importVM.sourceFileName
+            )
+        }
+        .alert("Import Failed", isPresented: $showingImportError) {
+            Button("OK") { importVM.errorMessage = nil }
+        } message: {
+            Text(importVM.errorMessage ?? "")
+        }
         // `.onAppear` runs when the view first shows — load the data then.
         .onAppear { vm.load() }
+    }
+
+    /// Kicks off the PDF → LLM pipeline for a dropped statement, then routes to
+    /// the review screen on success or an alert on failure.
+    private func startImport(from fileURL: URL) {
+        // Snapshot categories into plain `CategoryOption` values here, on the
+        // main thread, BEFORE starting any async work. Realm's managed
+        // `Category` objects are thread-confined and must never cross an
+        // `await` suspension point — the LLM's network call inside
+        // `ImportViewModel.process` can resume on a different thread than it
+        // started on, and touching a live Realm object from the wrong thread
+        // crashes.
+        let categories = RealmService.shared.objects(Category.self).map(CategoryOption.init)
+        importTask = Task {
+            await importVM.process(fileURL: fileURL, categories: categories)
+            if !importVM.parsedTransactions.isEmpty {
+                showingReview = true
+            } else if importVM.errorMessage != nil {
+                showingImportError = true
+            }
+        }
     }
 
     /// Expand a collapsed day or collapse an expanded one.
@@ -145,7 +228,9 @@ struct DashboardView: View {
                         }
                     }
                 case .chart:
-                    DistributionView(slices: vm.breakdown)
+                    DistributionView(slices: vm.breakdown) { row in
+                        editingRow = row
+                    }
                 }
 
                 Divider()
@@ -162,11 +247,14 @@ struct DashboardView: View {
 
 // MARK: - Processing Overlay
 
-/// Full-screen dimmed overlay shown while a dropped PDF is "processing".
-/// (Real Ollama parsing isn't wired up yet — this is a placeholder.)
+/// Full-screen dimmed overlay shown while a dropped PDF is being extracted and
+/// parsed by the LLM (see `ImportViewModel.process`).
 private struct ProcessingOverlay: View {
     let fileName: String
-    let onDismiss: () -> Void   // a function passed in from the parent, called on Dismiss
+    // "Parsing 3 of 6…" while a long statement is split into chunks (see
+    // `StatementChunker`/`ImportViewModel`); empty for a single-chunk import.
+    let progressLabel: String
+    let onCancel: () -> Void   // a function passed in from the parent, called on Cancel
 
     var body: some View {
         // `ZStack` layers children front-to-back (here: dim background, then content).
@@ -176,13 +264,21 @@ private struct ProcessingOverlay: View {
                 ProgressView()           // the spinning indicator
                     .scaleEffect(1.2)
                     .tint(.white)
-                Text("Processing \(fileName)")
+                Text("Reading \(fileName)")
                     .font(.system(size: 14, design: .monospaced))
                     .foregroundStyle(.white)
-                Text("Ollama integration coming soon")
+                if !progressLabel.isEmpty {
+                    Text(progressLabel)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+                Text("Extracting text and asking the LLM to categorize charges — a local")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.4))
-                Button("Dismiss") { onDismiss() }
+                Text("model can take several minutes on a long statement")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.4))
+                Button("Cancel") { onCancel() }
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.6))
                     .padding(.top, 8)
@@ -452,30 +548,58 @@ private struct DayHeaderRow: View {
 // MARK: - Distribution (Chart)
 
 /// The chart view: one row per category, sorted by spend, each with a proportional
-/// bar, its share of the period total, and the amount.
+/// bar, its share of the period total, and the amount. Tapping a category expands it
+/// to reveal its individual charges.
 private struct DistributionView: View {
     let slices: [DashboardViewModel.CategorySlice]
+    // Called when a charge inside an expanded category is tapped (to open the editor).
+    let onSelectCharge: (DashboardViewModel.TransactionRow) -> Void
+
+    // Category ids currently expanded. Local to the chart; resets when you leave it.
+    @State private var expanded: Set<String> = []
 
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
                 ForEach(slices) { slice in
-                    DistributionRow(slice: slice)
+                    DistributionRow(
+                        slice: slice,
+                        isExpanded: expanded.contains(slice.id),
+                        onToggle: { toggle(slice.id) },
+                        onSelectCharge: onSelectCharge
+                    )
                 }
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 16)
         }
     }
+
+    private func toggle(_ id: String) {
+        if expanded.contains(id) {
+            expanded.remove(id)
+        } else {
+            expanded.insert(id)
+        }
+    }
 }
 
-/// A single category's row in the chart: label + %/amount on top, a bar underneath.
+/// A single category's row in the chart: a tappable header (chevron + label + %/
+/// amount) over a proportional bar. When expanded, it lists the category's charges.
 private struct DistributionRow: View {
     let slice: DashboardViewModel.CategorySlice
+    let isExpanded: Bool
+    let onToggle: () -> Void
+    let onSelectCharge: (DashboardViewModel.TransactionRow) -> Void
 
     var body: some View {
         VStack(spacing: 6) {
+            // Header — tap anywhere on it to open/close the category.
             HStack(spacing: 8) {
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 10)
                 Text("\(slice.emoji) \(slice.name)")
                     .font(.system(.body, design: .monospaced))
                 Spacer()
@@ -488,6 +612,8 @@ private struct DistributionRow: View {
                     .font(.system(.body, design: .monospaced))
                     .frame(width: 110, alignment: .trailing)
             }
+            .contentShape(Rectangle())   // whole header is tappable
+            .onTapGesture { onToggle() }
 
             // The proportional bar. `GeometryReader` gives us the available width so
             // we can size the fill to `width * fraction`.
@@ -500,7 +626,50 @@ private struct DistributionRow: View {
                 }
             }
             .frame(height: 6)
+
+            // The dropdown: this category's individual charges. Tapping one edits it.
+            if isExpanded {
+                VStack(spacing: 0) {
+                    ForEach(slice.rows) { row in
+                        ChargeLine(row: row)
+                            .contentShape(Rectangle())
+                            .onTapGesture { onSelectCharge(row) }
+                        Divider().opacity(0.2)
+                    }
+                }
+                .padding(.top, 4)
+            }
         }
+    }
+}
+
+/// A compact line for one charge inside an expanded category: description (+ optional
+/// installment pill) on the left, date and amount on the right.
+private struct ChargeLine: View {
+    let row: DashboardViewModel.TransactionRow
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(row.description)
+                .lineLimit(1)
+            if let label = row.installmentLabel {
+                Text(label)
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Color.accentColor.opacity(0.18))
+                    .clipShape(Capsule())
+            }
+            Spacer()
+            Text(row.date.shortDateString)
+                .foregroundStyle(.secondary)
+                .frame(width: 56, alignment: .trailing)
+            Text(row.amount.currencyString)
+                .frame(width: 90, alignment: .trailing)
+        }
+        .font(.system(size: 12, design: .monospaced))
+        .padding(.vertical, 5)
+        .padding(.leading, 18)   // indent so it reads as nested under the category
     }
 }
 

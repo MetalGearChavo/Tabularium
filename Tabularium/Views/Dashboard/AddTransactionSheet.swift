@@ -15,6 +15,18 @@ struct AddTransactionSheet: View {
     @State private var selectedCategoryId: String = ""
     @State private var monthsText: String = "1"       // installments (MSI); 1 = single charge
 
+    // How many transactions we've saved so far without closing the sheet, so we can
+    // show a "N added" hint during a bulk entry session. `@State` because it's UI-only.
+    @State private var savedCount: Int = 0
+
+    // Which text field currently has the keyboard. `@FocusState` is SwiftUI's way to
+    // read AND control focus: after "Save & Add Another" we set this back to `.amount`
+    // so the user can immediately type the next charge without reaching for the mouse.
+    @FocusState private var focusedField: Field?
+
+    /// The focusable text fields in this form. Used with `@FocusState` above.
+    private enum Field { case amount, description }
+
     // Computed properties (recalculated each time they're read):
     private var categories: [Category] { RealmService.shared.objects(Category.self) }
     // Form is valid only if amount is a real number and description isn't blank.
@@ -30,8 +42,20 @@ struct AddTransactionSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
-            Text("Add Transaction")
-                .font(.system(size: 16, weight: .semibold, design: .monospaced))
+            HStack {
+                Text("Add Transaction")
+                    .font(.system(size: 16, weight: .semibold, design: .monospaced))
+
+                Spacer()
+
+                // During a bulk session, remind the user how many they've saved so far.
+                // Only appears once at least one has been added.
+                if savedCount > 0 {
+                    Text("\(savedCount) added")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+            }
 
             VStack(alignment: .leading, spacing: 16) {
                 // `field(label:)` is a small helper (defined below) that wraps each
@@ -48,6 +72,7 @@ struct AddTransactionSheet: View {
                         .padding(8)
                         .background(Color.primary.opacity(0.06))
                         .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .focused($focusedField, equals: .amount)   // bind this field to the .amount focus case
                         // Strip anything that isn't a digit or the first dot, on every
                         // keystroke. The guard avoids an endless write loop.
                         .onChange(of: amountText) { _, value in
@@ -65,6 +90,7 @@ struct AddTransactionSheet: View {
                         .padding(8)
                         .background(Color.primary.opacity(0.06))
                         .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .focused($focusedField, equals: .description)
                 }
 
                 field(label: "CATEGORY") {
@@ -107,13 +133,19 @@ struct AddTransactionSheet: View {
             Spacer()
 
             HStack {
-                Button("Cancel") { dismiss() }
+                // Saves the current entry and closes the sheet — the normal "I'm done"
+                // action. (Sits where Cancel used to; a blank form just stays disabled.)
+                Button("Save") { save(keepOpen: false) }
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
+                    .disabled(!isValid)
+                    .opacity(isValid ? 1 : 0.4)
 
                 Spacer()
 
-                Button("Save") { save() }
+                // Saves the current entry but KEEPS the sheet open with the same date,
+                // so you can enter a whole day's charges without re-picking the date.
+                Button("Add Another") { save(keepOpen: true) }
                     .buttonStyle(.plain)
                     .font(.system(size: 14, weight: .semibold, design: .monospaced))
                     .disabled(!isValid)              // grey out until the form is valid
@@ -125,6 +157,7 @@ struct AddTransactionSheet: View {
         // When the sheet appears, default the category picker to the first category.
         .onAppear {
             selectedCategoryId = categories.first?.id ?? ""
+            focusedField = .amount   // start with the cursor on AMOUNT, ready to type
         }
     }
 
@@ -141,8 +174,13 @@ struct AddTransactionSheet: View {
         }
     }
 
-    /// Builds a `Transaction` from the form and saves it, then closes the sheet.
-    private func save() {
+    /// Builds a `Transaction` from the form and saves it.
+    ///
+    /// - Parameter keepOpen: when `true` (the "Save & Add Another" button), the sheet
+    ///   stays open and only the amount/description are cleared — the date, category,
+    ///   and MSI count carry over so a run of same-day charges is fast to enter. When
+    ///   `false` (the "Save" button), the sheet closes as before.
+    private func save(keepOpen: Bool) {
         // `Double(amountText)` returns an optional (nil if the text isn't a number).
         // `guard` bails out safely if parsing fails.
         guard let amount = Double(amountText) else { return }
@@ -155,6 +193,16 @@ struct AddTransactionSheet: View {
         transaction.reviewed = true   // manually added → already "reviewed"
         transaction.installments = months   // 1 = single charge; 2+ = MSI (amount is the total)
         RealmService.shared.save(transaction)
-        dismiss()
+        savedCount += 1
+
+        if keepOpen {
+            // Clear only the per-charge fields; keep date/category/months for the next one.
+            amountText = ""
+            description = ""
+            monthsText = "1"
+            focusedField = .amount   // put the cursor back on AMOUNT to type the next charge
+        } else {
+            dismiss()
+        }
     }
 }

@@ -9,6 +9,13 @@ struct SettingsView: View {
     // Loaded from the database in `reload()`. `@State` so the view refreshes when set.
     @State private var cards: [Card] = []
     @State private var categories: [Category] = []
+    @State private var merchantAliases: [MerchantAlias] = []
+
+    // Temporary input fields for creating a new merchant alias — same idea as
+    // the category fields: reset to "" after each add.
+    @State private var newAliasPattern: String = ""
+    @State private var newAliasDisplayName: String = ""
+    @State private var newAliasCategoryId: String = ""
 
     // The two input fields for creating a new category. `@State` because they're
     // temporary UI values owned by this view; they reset to "" after each add.
@@ -42,6 +49,17 @@ struct SettingsView: View {
     // edit sheet via `.sheet(item:)`.
     @State private var cardToEdit: Card?
 
+    // Shared connection-status state (same instance the sidebar badge reads), so
+    // Settings shows a live light instead of a hardcoded one.
+    @ObservedObject private var llmMonitor = LLMConnectionMonitor.shared
+
+    // The backend URL + model `LLMService` reads per-request (CLAUDE.md → "AI
+    // Layer"). `@AppStorage` reads/writes the exact same `UserDefaults` keys, so
+    // editing these here takes effect on the very next import — no restart, no
+    // recompiling. Defaults match `LLMService`'s own fallback values.
+    @AppStorage("llmBaseURL") private var llmBaseURL = "http://localhost:11434/v1"
+    @AppStorage("llmModel") private var llmModel = "llama3.2"
+
     /// Whether the new-card form is complete enough to save. Mirrors the same rule
     /// onboarding uses: a name, a bank, and exactly 4 digits for the last four.
     private var newCardIsValid: Bool {
@@ -49,6 +67,16 @@ struct SettingsView: View {
             && !newCardBank.trimmingCharacters(in: .whitespaces).isEmpty
             && newCardLastFour.count == 4
             && newCardLastFour.allSatisfy(\.isNumber)
+    }
+
+    /// The model picker's options: the backend's installed models, plus the
+    /// currently-stored value if it isn't among them (e.g. it was never
+    /// installed, or got uninstalled) — a `Picker`'s `selection` must match one
+    /// of its options' tags exactly, or it renders with nothing highlighted.
+    private var modelOptions: [String] {
+        llmMonitor.availableModels.contains(llmModel)
+            ? llmMonitor.availableModels
+            : [llmModel] + llmMonitor.availableModels
     }
 
     var body: some View {
@@ -222,6 +250,122 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Merchant Names") {
+                Text("Bank statements print merchant names mangled by whatever payment "
+                    + "processor touched the charge. Teach the app a fix once and every "
+                    + "future import applies it automatically.")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+
+                if merchantAliases.isEmpty {
+                    Text("No merchant rules saved")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(merchantAliases) { alias in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("\"\(alias.pattern)\" → \(alias.displayName)")
+                                    .font(.system(.body, design: .monospaced))
+                                Text(categoryLabel(for: alias.categoryId))
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button {
+                                deleteMerchantAlias(alias)
+                            } label: {
+                                Image(systemName: "trash")
+                                    .foregroundStyle(.red)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+
+                // The "add new rule" form, shown at the bottom of the section.
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField("Pattern (e.g. UBER)", text: $newAliasPattern)
+                        .font(.system(.body, design: .monospaced))
+                    TextField("Clean name (e.g. Uber)", text: $newAliasDisplayName)
+                        .font(.system(.body, design: .monospaced))
+
+                    HStack {
+                        Picker("", selection: $newAliasCategoryId) {
+                            Text("No category").tag("")
+                            ForEach(categories) { cat in
+                                Text("\(cat.emoji) \(cat.name)").tag(cat.id)
+                            }
+                        }
+                        .labelsHidden()
+
+                        Spacer()
+
+                        Button("Add Rule", action: addMerchantAlias)
+                            .font(.system(.body, design: .monospaced))
+                            .disabled(newAliasPattern.trimmingCharacters(in: .whitespaces).isEmpty
+                                || newAliasDisplayName.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+
+            Section("LLM") {
+                // Connection status light + label (Online / Offline).
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(llmMonitor.connection.color)
+                        .frame(width: 8, height: 8)
+                    Text(llmMonitor.connection.isOnline ? "Online" : "Offline")
+                        .font(.system(.body, design: .monospaced))
+                }
+                // What we're connected to, e.g. "Local · Ollama".
+                HStack {
+                    Text("Connection")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(llmMonitor.connection.detail)
+                        .font(.system(.body, design: .monospaced))
+                }
+                Button("Recheck Connection") {
+                    Task { await llmMonitor.refresh() }
+                }
+
+                // Lets the backend/model be swapped without recompiling — e.g.
+                // trying a different local model, or pointing at a hosted
+                // EC2/vLLM endpoint later (CLAUDE.md → "AI Layer").
+                HStack {
+                    Text("Base URL").foregroundStyle(.secondary)
+                    Spacer()
+                    TextField("http://localhost:11434/v1", text: $llmBaseURL)
+                        .multilineTextAlignment(.trailing)
+                        .font(.system(.body, design: .monospaced))
+                        .textFieldStyle(.plain)
+                }
+                HStack {
+                    Text("Model").foregroundStyle(.secondary)
+                    Spacer()
+                    if llmMonitor.availableModels.isEmpty {
+                        // Backend unreachable (or hasn't been checked yet) — we
+                        // don't know what's installed, so fall back to free text
+                        // rather than showing an empty picker.
+                        TextField("llama3.2", text: $llmModel)
+                            .multilineTextAlignment(.trailing)
+                            .font(.system(.body, design: .monospaced))
+                            .textFieldStyle(.plain)
+                    } else {
+                        Picker("", selection: $llmModel) {
+                            // `modelOptions` guarantees the current value always
+                            // has a matching tag, even if it's not (or no longer)
+                            // installed — otherwise the picker would show blank.
+                            ForEach(modelOptions, id: \.self) { name in
+                                Text(name).tag(name)
+                            }
+                        }
+                        .labelsHidden()
+                    }
+                }
+            }
+
             Section("Debug") {
                 // Wipes the database and flips the onboarding flag back to false.
                 // Because `ContentView` watches that flag, the app immediately
@@ -235,6 +379,7 @@ struct SettingsView: View {
             }
         }
         .onAppear { reload() }   // load fresh data whenever the screen shows
+        .task { await llmMonitor.refresh() }   // and re-check the LLM connection
         // Confirmation before a destructive card delete. `presenting:` hands the
         // pending card into both closures so we can name it and delete the right one.
         .alert("Delete card?", isPresented: $showingDeleteCardAlert, presenting: cardToDelete) { card in
@@ -250,10 +395,19 @@ struct SettingsView: View {
         }
     }
 
-    /// Pulls the latest cards and categories from the database into local state.
+    /// Pulls the latest cards, categories, and merchant rules into local state.
     private func reload() {
         cards = RealmService.shared.objects(Card.self)
         categories = RealmService.shared.objects(Category.self)
+        merchantAliases = RealmService.shared.objects(MerchantAlias.self)
+    }
+
+    /// Emoji + name for a merchant rule's category, or a placeholder when it
+    /// has none (a name-only rule) or points at a since-deleted category.
+    private func categoryLabel(for categoryId: String) -> String {
+        guard !categoryId.isEmpty else { return "No category" }
+        guard let category = categories.first(where: { $0.id == categoryId }) else { return "Uncategorized" }
+        return "\(category.emoji) \(category.name)"
     }
 
     /// Creates a new card from the input fields and saves it to the database.
@@ -330,6 +484,31 @@ struct SettingsView: View {
     /// anything, so the dashboard shows them as "·" / "Uncategorized".
     private func deleteCategory(_ category: Category) {
         RealmService.shared.delete(Category.self, id: category.id)
+        reload()
+    }
+
+    /// Creates a new merchant alias from the input fields and saves it. Applied
+    /// automatically on every future import — see `MerchantAliasMatcher`.
+    private func addMerchantAlias() {
+        let pattern = newAliasPattern.trimmingCharacters(in: .whitespaces)
+        let displayName = newAliasDisplayName.trimmingCharacters(in: .whitespaces)
+        guard !pattern.isEmpty, !displayName.isEmpty else { return }
+
+        let alias = MerchantAlias()
+        alias.pattern = pattern
+        alias.displayName = displayName
+        alias.categoryId = newAliasCategoryId
+        RealmService.shared.save(alias)
+
+        newAliasPattern = ""
+        newAliasDisplayName = ""
+        newAliasCategoryId = ""
+        reload()
+    }
+
+    /// Deletes a single merchant alias (triggered by its trash button).
+    private func deleteMerchantAlias(_ alias: MerchantAlias) {
+        RealmService.shared.delete(MerchantAlias.self, id: alias.id)
         reload()
     }
 }
