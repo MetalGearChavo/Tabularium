@@ -17,6 +17,11 @@ extension Date {
         formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
     }
 
+    /// e.g. "Mon, Oct 12, 2026" — the selected date in the Add sheet's day stepper.
+    var longDayString: String {
+        formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day().year())
+    }
+
     /// The first instant of this date's month (e.g. June 1 at 00:00).
     /// Used to filter transactions to "this month".
     var startOfMonth: Date {

@@ -30,6 +30,8 @@ Tabularium/
 │   │   ├── DashboardView.swift       # nav, header, list/chart, day groups,     ✅
 │   │   │                             # drag & drop PDF import entry point
 │   │   ├── AddTransactionSheet.swift                                          ✅
+│   │   ├── DayGridPicker.swift       # big always-visible month calendar for   ✅
+│   │   │                             # the Add sheet's date
 │   │   └── EditTransactionSheet.swift                                         ✅
 │   ├── Import/ImportView.swift       # unused placeholder — import is          ⏳
 │   │                                 # triggered by dropping onto Dashboard
@@ -65,6 +67,8 @@ Tabularium/
 │
 └── Extensions/                       # Swift extensions on built-in types
     ├── Character+Emoji.swift         # isEmoji (category emoji input)          ✅
+    ├── Date+CalendarGrid.swift       # month-grid cells + weekday header       ✅
+    │                                 # order (for DayGridPicker)
     ├── Date+Formatting.swift         # period labels + billingPeriod()         ✅
     ├── Double+Currency.swift         # "$1,234.56" formatting                  ✅
     └── String+Amount.swift           # amount-field input filtering            ✅

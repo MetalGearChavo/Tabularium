@@ -1,6 +1,9 @@
 import SwiftUI
 
-/// A modal form for manually adding a new transaction to the selected card.
+/// View layer: a modal form for manually adding a new transaction to the selected card.
+/// Close it with Save, keep it open with Add Another, or leave without saving via ✕ / Esc.
+/// The date is picked from an always-visible calendar (`DayGridPicker`) with quick-jump
+/// presets (Today, Yesterday, Last Week, Last Month) — built for entering many past charges quickly.
 struct AddTransactionSheet: View {
     // Reads which card is currently selected (saved by the dashboard).
     @AppStorage("selectedCardId") private var selectedCardId = ""
@@ -55,86 +58,116 @@ struct AddTransactionSheet: View {
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }
+
+                // Closes the sheet WITHOUT saving whatever is currently in the form.
+                // Anything already saved via "Add Another" stays saved — it's in Realm.
+                Button {
+                    dismiss()
+                } label: {
+                    // `Image(systemName:)` draws an SF Symbol, Apple's built-in icon set.
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                // `.keyboardShortcut(.cancelAction)` binds this button to the Esc key.
+                // On macOS a sheet has no built-in close control and ignores clicks
+                // outside it, so without this there'd be no keyboard way out at all.
+                .keyboardShortcut(.cancelAction)
+                // `.help` is the hover tooltip on macOS.
+                .help("Close without saving (Esc)")
             }
 
-            VStack(alignment: .leading, spacing: 16) {
-                // `field(label:)` is a small helper (defined below) that wraps each
-                // input with a label, so we don't repeat the styling four times.
-                field(label: "DATE") {
-                    DatePicker("", selection: $date, displayedComponents: .date)
-                        .labelsHidden()
-                }
+            // Two columns: the big always-visible calendar on the left (option 1), the
+            // form fields on the right. Side by side keeps the sheet short enough for
+            // a laptop screen.
+            HStack(alignment: .top, spacing: 28) {
+                // Clicking a day sets `date` and jumps the cursor to AMOUNT, so a run of
+                // past charges is: click day → type amount → description → Add Another.
+                DayGridPicker(selection: $date) { focusedField = .amount }
 
-                field(label: "AMOUNT") {
-                    TextField("0.00", text: $amountText)   // `$amountText` = two-way binding
-                        .font(.system(size: 14, design: .monospaced))
-                        .textFieldStyle(.plain)
-                        .padding(8)
-                        .background(Color.primary.opacity(0.06))
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                        .focused($focusedField, equals: .amount)   // bind this field to the .amount focus case
-                        // Strip anything that isn't a digit or the first dot, on every
-                        // keystroke. The guard avoids an endless write loop.
-                        .onChange(of: amountText) { _, value in
-                            let filtered = value.amountInputFiltered
-                            if filtered != amountText {
-                                amountText = filtered
-                            }
-                        }
-                }
-
-                field(label: "DESCRIPTION") {
-                    TextField("Walmart", text: $description)
-                        .font(.system(size: 14, design: .monospaced))
-                        .textFieldStyle(.plain)
-                        .padding(8)
-                        .background(Color.primary.opacity(0.06))
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                        .focused($focusedField, equals: .description)
-                }
-
-                field(label: "CATEGORY") {
-                    // A dropdown bound to `selectedCategoryId`. Each option's `.tag`
-                    // is the value stored when that option is chosen.
-                    Picker("", selection: $selectedCategoryId) {
-                        Text("None").tag("")
-                        ForEach(categories) { cat in
-                            Text("\(cat.emoji) \(cat.name)").tag(cat.id)
-                        }
+                VStack(alignment: .leading, spacing: 16) {
+                    // `field(label:)` is a small helper (defined below) that wraps each
+                    // input with a label, so we don't repeat the styling four times.
+                    field(label: "DATE") {
+                        Text(date.longDayString)
+                            .font(.system(size: 14, weight: .medium, design: .monospaced))
+                            .padding(.vertical, 4)
                     }
-                    .labelsHidden()
-                }
 
-                field(label: "MONTHS · MSI (1 = de contado)") {
-                    HStack(spacing: 10) {
-                        TextField("1", text: $monthsText)
+                    field(label: "AMOUNT") {
+                        TextField("0.00", text: $amountText)   // `$amountText` = two-way binding
                             .font(.system(size: 14, design: .monospaced))
                             .textFieldStyle(.plain)
                             .padding(8)
                             .background(Color.primary.opacity(0.06))
                             .clipShape(RoundedRectangle(cornerRadius: 6))
-                            .frame(width: 70)
-                            // Keep only digits, at most 2 (so up to 99 months).
-                            .onChange(of: monthsText) { _, value in
-                                let digits = String(value.filter(\.isNumber).prefix(2))
-                                if digits != monthsText { monthsText = digits }
+                            .focused($focusedField, equals: .amount)   // bind this field to the .amount focus case
+                            // Strip anything that isn't a digit or the first dot, on every
+                            // keystroke. The guard avoids an endless write loop.
+                            .onChange(of: amountText) { _, value in
+                                let filtered = value.amountInputFiltered
+                                if filtered != amountText {
+                                    amountText = filtered
+                                }
                             }
+                    }
 
-                        // Live "= $X / mes" hint for installment plans.
-                        if let preview = monthlyPreview {
-                            Text(preview)
-                                .font(.system(size: 12, design: .monospaced))
-                                .foregroundStyle(.secondary)
+                    field(label: "DESCRIPTION") {
+                        TextField("Walmart", text: $description)
+                            .font(.system(size: 14, design: .monospaced))
+                            .textFieldStyle(.plain)
+                            .padding(8)
+                            .background(Color.primary.opacity(0.06))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .focused($focusedField, equals: .description)
+                    }
+
+                    field(label: "CATEGORY") {
+                        // A dropdown bound to `selectedCategoryId`. Each option's `.tag`
+                        // is the value stored when that option is chosen.
+                        Picker("", selection: $selectedCategoryId) {
+                            Text("None").tag("")
+                            ForEach(categories) { cat in
+                                Text("\(cat.emoji) \(cat.name)").tag(cat.id)
+                            }
+                        }
+                        .labelsHidden()
+                    }
+
+                    field(label: "MONTHS · MSI (1 = de contado)") {
+                        HStack(spacing: 10) {
+                            TextField("1", text: $monthsText)
+                                .font(.system(size: 14, design: .monospaced))
+                                .textFieldStyle(.plain)
+                                .padding(8)
+                                .background(Color.primary.opacity(0.06))
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .frame(width: 70)
+                                // Keep only digits, at most 2 (so up to 99 months).
+                                .onChange(of: monthsText) { _, value in
+                                    let digits = String(value.filter(\.isNumber).prefix(2))
+                                    if digits != monthsText { monthsText = digits }
+                                }
+
+                            // Live "= $X / mes" hint for installment plans.
+                            if let preview = monthlyPreview {
+                                Text(preview)
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             Spacer()
 
             HStack {
                 // Saves the current entry and closes the sheet — the normal "I'm done"
-                // action. (Sits where Cancel used to; a blank form just stays disabled.)
+                // action. A blank form keeps it disabled; to leave without saving, use
+                // the ✕ in the header (or Esc).
                 Button("Save") { save(keepOpen: false) }
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
@@ -153,7 +186,8 @@ struct AddTransactionSheet: View {
             }
         }
         .padding(28)
-        .frame(width: 340)
+        // Wide enough for the calendar (276pt) + gap + the form column.
+        .frame(width: 640)
         // When the sheet appears, default the category picker to the first category.
         .onAppear {
             selectedCategoryId = categories.first?.id ?? ""

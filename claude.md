@@ -63,11 +63,17 @@ The owner is new to Swift. Whenever you write or edit code, comment it to teach,
 What actually exists in the code today:
 - **Onboarding**: add cards (name, bank, last 4, type, fecha de corte) + create categories.
 - **Manual entry**: add / edit / delete transactions, including monthly installments (MSI).
+  The Add sheet supports "Add Another" for bulk entry and closes without saving via ✕ / Esc.
+  Its date is picked from a large always-visible calendar (`DayGridPicker`, one click per
+  day, cursor then jumps to AMOUNT) with quick-jump presets (`Today`, `Yesterday`,
+  `Last Week`, `Last Month`).
 - **Dashboard** (per card):
   - Period selector: **billing cycle (fecha de corte) or calendar month**, with ◀ ▶ nav.
   - **List / Chart** toggle. List groups by day (collapsible); Chart shows a per-category
     breakdown with % + bar, and each category expands to its charges.
   - Running total; tap any charge to edit.
+  - "+ Add" button in the toolbar (labeled, accent-colored), and a large
+    "Add Transaction" button in the empty state when a period has no charges.
   - **Drag & drop PDF import**: drop a statement onto the transaction list → `PDFService`
     extracts text → `StatementTextFilter` strips non-transaction noise → `StatementChunker`
     splits it into small batches → `LLMService` (Ollama) parses + categorizes each batch →

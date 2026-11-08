@@ -96,13 +96,21 @@ struct DashboardView: View {
                 .help("Export this period to CSV")
             }
 
-            // The "+" button in the window toolbar that opens the Add sheet.
+            // The "+ Add" button in the window toolbar that opens the Add sheet.
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     showingAddTransaction = true
                 } label: {
-                    Image(systemName: "plus")
+                    // `Label` pairs text with an SF Symbol icon. Toolbars show only the
+                    // icon by default — which is what made the old "+" so small to hit —
+                    // so `.labelStyle(.titleAndIcon)` forces both the "+" AND "Add" text.
+                    Label("Add", systemImage: "plus")
+                        .labelStyle(.titleAndIcon)
                 }
+                // `.borderedProminent` fills the button with the accent color: a wider,
+                // obvious click target that reads as the screen's main action.
+                .buttonStyle(.borderedProminent)
+                .help("Add a transaction")   // hover tooltip
             }
         }
         // The system save panel for the CSV export.
@@ -197,7 +205,9 @@ struct DashboardView: View {
             Divider()
 
             if vm.rows.isEmpty {
-                EmptyDashboard()
+                // `{ ... }` right after the type name is "trailing closure" syntax: the
+                // last closure argument (`onAdd`) written outside the parentheses.
+                EmptyDashboard { showingAddTransaction = true }
             } else {
                 // Swap the middle area between the transaction list and the chart.
                 switch vm.viewMode {
@@ -675,13 +685,27 @@ private struct ChargeLine: View {
 
 // MARK: - Empty State
 
-/// Shown when the selected card+month has no transactions.
+/// Shown when the selected card + period has no transactions. Offers the two ways
+/// to fill it: a big "Add Transaction" button, or dropping a PDF statement here.
 private struct EmptyDashboard: View {
+    let onAdd: () -> Void   // called when the button is clicked; the parent opens the sheet
+
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 12) {
             Text("No transactions")
                 .font(.system(.body, design: .monospaced))
-            Text("Import a statement or add a transaction to get started")
+
+            Button(action: onAdd) {
+                Label("Add Transaction", systemImage: "plus")
+                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 4)
+            }
+            .buttonStyle(.borderedProminent)
+            // `.controlSize(.large)` asks macOS for its biggest standard button size.
+            .controlSize(.large)
+
+            Text("or drop a PDF statement here")
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary)
         }
