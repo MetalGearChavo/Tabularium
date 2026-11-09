@@ -31,8 +31,9 @@ Tabularium/
 │   │   │                             # drag & drop PDF import entry point
 │   │   ├── AddTransactionSheet.swift                                          ✅
 │   │   ├── DayGridPicker.swift       # big always-visible month calendar for   ✅
-│   │   │                             # the Add sheet's date
-│   │   └── EditTransactionSheet.swift                                         ✅
+│   │   │                             # the Add/Edit sheets' date
+│   │   ├── EditTransactionSheet.swift                                         ✅
+│   │   └── TransactionFormContent.swift # shared two-column calendar + fields  ✅
 │   ├── Import/ImportView.swift       # unused placeholder — import is          ⏳
 │   │                                 # triggered by dropping onto Dashboard
 │   ├── Review/ReviewView.swift       # editable list of parsed transactions,   ✅
@@ -66,11 +67,13 @@ Tabularium/
 │   └── CSVDocument.swift             # FileDocument for CSV export             ✅
 │
 └── Extensions/                       # Swift extensions on built-in types
+    ├── BudgetSummary.swift           # per-card cycle budget diff + daily pace ✅
     ├── Character+Emoji.swift         # isEmoji (category emoji input)          ✅
     ├── Date+CalendarGrid.swift       # month-grid cells + weekday header       ✅
     │                                 # order (for DayGridPicker)
     ├── Date+Formatting.swift         # period labels + billingPeriod()         ✅
     ├── Double+Currency.swift         # "$1,234.56" formatting                  ✅
+    ├── InstallmentPlan.swift         # MSI current/total parsing + back-dating ✅
     └── String+Amount.swift           # amount-field input filtering            ✅
 ```
 

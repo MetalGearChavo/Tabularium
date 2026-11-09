@@ -22,9 +22,6 @@ struct DashboardView: View {
     @State private var showingReview = false      // opens ReviewView once parsing succeeds
     @State private var showingImportError = false // drives the failure alert
     @State private var importTask: Task<Void, Never>?  // lets the overlay's Cancel stop an in-flight import
-    // Day-group ids that are currently expanded in the list. Empty = all collapsed,
-    // which is the default. `Set` gives fast membership checks.
-    @State private var expandedDays: Set<String> = []
 
     // CSV export state. We prepare the document + filename when the button is tapped,
     // then present the system save panel via `.fileExporter`.
@@ -133,7 +130,11 @@ struct DashboardView: View {
         // `.sheet(item:)` opens whenever `editingRow` becomes non-nil (i.e. a row was
         // tapped) and passes that row in. We reload on dismiss to reflect any edits.
         .sheet(item: $editingRow, onDismiss: { vm.load() }) { row in
-            EditTransactionSheet(transactionId: row.id)
+            EditTransactionSheet(
+                transactionId: row.id,
+                displayedRowDate: row.date,
+                installmentLabel: row.installmentLabel
+            )
         }
         .overlay {
             if importVM.isProcessing {
@@ -188,15 +189,6 @@ struct DashboardView: View {
         }
     }
 
-    /// Expand a collapsed day or collapse an expanded one.
-    private func toggleDay(_ id: String) {
-        if expandedDays.contains(id) {
-            expandedDays.remove(id)
-        } else {
-            expandedDays.insert(id)
-        }
-    }
-
     // Everything below the header bar, pulled into its own property to keep `body`
     // readable. `@ViewBuilder` lets it contain `if/else` and multiple views.
     @ViewBuilder
@@ -214,27 +206,8 @@ struct DashboardView: View {
                 case .list:
                     // `ScrollView` makes its contents scrollable when they overflow.
                     ScrollView {
-                        VStack(spacing: 0) {
-                            // One collapsible section per day. Tapping a day header
-                            // toggles whether its transactions are shown.
-                            ForEach(vm.dayGroups) { group in
-                                DayHeaderRow(
-                                    group: group,
-                                    isExpanded: expandedDays.contains(group.id)
-                                ) {
-                                    toggleDay(group.id)
-                                }
-
-                                // Only render the day's rows when it's expanded.
-                                if expandedDays.contains(group.id) {
-                                    ForEach(group.rows) { row in
-                                        CategoryRowView(row: row)
-                                            .contentShape(Rectangle())
-                                            .onTapGesture { editingRow = row }
-                                        Divider().opacity(0.3)
-                                    }
-                                }
-                            }
+                        LedgerListView(dayGroups: vm.dayGroups) { row in
+                            editingRow = row
                         }
                     }
                 case .chart:
@@ -245,7 +218,10 @@ struct DashboardView: View {
 
                 Divider()
 
-                TotalRow(total: vm.total)
+                BudgetFooterBarView(
+                    summary: vm.budgetSummary,
+                    onSaveBudget: { vm.updateSelectedCardBudget($0) }
+                )
             }
         }
         // Fill all available space so the drop target/border covers the whole lower
@@ -421,20 +397,106 @@ private struct ViewModeToggle: View {
     }
 }
 
-// MARK: - Transaction Row
+// MARK: - Ledger List View
 
-/// One row in the list: description · category emoji · date · amount.
-private struct CategoryRowView: View {
+/// View layer: always-open daily ledger cards (`LedgerListView`).
+///
+/// Each day's charges sit inside a rounded card container under a relative day
+/// header (`TODAY ·` / `YESTERDAY ·`). Single-charge days omit the redundant
+/// count and daily subtotal; multi-charge days show `· N charges` and the day's
+/// subtotal on the right. Inside each row: a 28pt left emoji avatar, merchant
+/// description (+ MSI pill), aligned category name column, and split `$890.00`
+/// dollar/cents typography with row hover highlighting.
+private struct LedgerListView: View {
+    let dayGroups: [DashboardViewModel.DayGroup]
+    let onSelectRow: (DashboardViewModel.TransactionRow) -> Void
+
+    var body: some View {
+        VStack(spacing: 14) {
+            ForEach(dayGroups) { group in
+                VStack(alignment: .leading, spacing: 6) {
+                    // Day header with TODAY / YESTERDAY callout
+                    HStack(spacing: 8) {
+                        Text(Self.dayHeaderLabel(for: group.date))
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(
+                                Calendar.current.isDateInToday(group.date) ? Color.accentColor : Color.secondary
+                            )
+
+                        if group.rows.count >= 2 {
+                            Text("· \(group.rows.count) charges")
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(.secondary.opacity(0.75))
+                        }
+
+                        Spacer()
+
+                        // Only show a day subtotal when there are 2+ charges to sum.
+                        if group.rows.count >= 2 {
+                            Text(group.total.currencyString)
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.horizontal, 4)
+
+                    // Rounded day card with left emoji avatars, aligned categories, and split amounts
+                    VStack(spacing: 0) {
+                        ForEach(Array(group.rows.enumerated()), id: \.element.id) { index, row in
+                            LedgerTransactionRow(row: row) {
+                                onSelectRow(row)
+                            }
+
+                            if index < group.rows.count - 1 {
+                                Divider().opacity(0.25).padding(.leading, 56).padding(.trailing, 14)
+                            }
+                        }
+                    }
+                    .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+                    )
+                }
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+    }
+
+    /// Builds a relative day label (`TODAY · SAT, NOV 7` or `YESTERDAY · FRI, NOV 6`)
+    /// so recent activity stands out immediately.
+    private static func dayHeaderLabel(for date: Date) -> String {
+        let cal = Calendar.current
+        let base = date.dayHeaderString.uppercased()
+        if cal.isDateInToday(date) {
+            return "TODAY · \(base)"
+        } else if cal.isDateInYesterday(date) {
+            return "YESTERDAY · \(base)"
+        }
+        return base
+    }
+}
+
+/// One row inside a day card: 28pt left emoji avatar, merchant description (+ optional
+/// MSI pill), fixed-width aligned category column, and split `$890.00` amount.
+private struct LedgerTransactionRow: View {
     let row: DashboardViewModel.TransactionRow
-    // Tracks whether the mouse is over the emoji, to show the category tooltip.
-    @State private var hovering = false
+    let onTap: () -> Void
+
+    @State private var isHovering = false
 
     var body: some View {
         HStack(spacing: 12) {
+            // Left emoji avatar badge
+            Text(row.emoji)
+                .font(.system(size: 14))
+                .frame(width: 28, height: 28)
+                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+
             HStack(spacing: 6) {
                 Text(row.description)
-                    .lineLimit(1)                                  // never wrap to a 2nd line
-                // For an installment purchase, a small "3/12" pill next to the name.
+                    .lineLimit(1)
                 if let label = row.installmentLabel {
                     Text(label)
                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
@@ -444,114 +506,181 @@ private struct CategoryRowView: View {
                         .clipShape(Capsule())
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)       // takes the leftover width
+            .frame(maxWidth: .infinity, alignment: .leading)
 
-            Text(row.emoji)
-                .frame(width: 24)
-                .contentShape(Rectangle())     // make the whole 24pt box hoverable
-                .onHover { hovering = $0 }      // $0 is true when entering, false when leaving
-                .overlay(alignment: .top) {
-                    if hovering {
-                        // A small bubble showing the category name. Placed BELOW the emoji
-                        // (offset down) so the first row's tooltip isn't clipped by the
-                        // scroll view's top edge.
-                        CategoryTooltip(name: row.category)
-                            .fixedSize()             // don't shrink the bubble to fit
-                            .offset(y: 26)
-                            .transition(.opacity)    // fade in/out
+            // Fixed-width left-aligned category column so categories line up vertically
+            Text(row.category)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .frame(width: 120, alignment: .leading)
+
+            SplitAmountText(amount: row.amount)
+                .frame(width: 100, alignment: .trailing)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(isHovering ? Color.primary.opacity(0.05) : Color.clear)
+        .contentShape(Rectangle())
+        .onHover { isHovering = $0 }
+        .onTapGesture { onTap() }
+    }
+}
+
+/// Formats an amount with crisp primary whole dollars and softer secondary `.00` cents
+/// so large dollar magnitudes pop out when scanning down the right edge.
+private struct SplitAmountText: View {
+    let amount: Double
+
+    var body: some View {
+        let full = amount.currencyString
+        if let dotIndex = full.lastIndex(of: ".") {
+            let wholePart = String(full[..<dotIndex])
+            let centsPart = String(full[dotIndex...])
+            HStack(alignment: .firstTextBaseline, spacing: 0) {
+                Text(wholePart)
+                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.primary)
+                Text(centsPart)
+                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+        } else {
+            Text(full)
+                .font(.system(size: 13, weight: .semibold, design: .monospaced))
+        }
+    }
+}
+
+// MARK: - Budget Footer Bar
+
+/// Color helper for budget status (green when under, orange when ≥85%, red when over).
+private func budgetStatusColor(_ status: BudgetSummary.Status) -> Color {
+    switch status {
+    case .under:   return .green
+    case .warning: return .orange
+    case .over:    return .red
+    }
+}
+
+/// View layer: the bottom `TOTAL` bar with a top-edge progress bar, `TOTAL $Spent / $Budget (N%)`,
+/// a color-coded diff badge on the right (`+$X left` / `-$X over`), and an inline popover
+/// for setting or editing the selected card's cycle budget.
+private struct BudgetFooterBarView: View {
+    let summary: BudgetSummary
+    let onSaveBudget: (Double) -> Void
+
+    @State private var showingEditor = false
+    @State private var budgetInput: String = ""
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if summary.isConfigured {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Rectangle().fill(Color.primary.opacity(0.07))
+                        Rectangle()
+                            .fill(budgetStatusColor(summary.status))
+                            .frame(width: max(0, geo.size.width * summary.fraction))
                     }
                 }
+                .frame(height: 3)
+            }
 
-            Text(row.date.shortDateString)   // "Jun 1"
-                .foregroundStyle(.secondary)
-                .frame(width: 60, alignment: .trailing)
+            HStack(spacing: 10) {
+                Text("TOTAL")
+                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
 
-            Text(row.amount.currencyString)  // "$1,234.50"
-                .frame(width: 90, alignment: .trailing)
+                Text(summary.spent.currencyString)
+                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
+
+                if summary.isConfigured {
+                    Button {
+                        openEditor()
+                    } label: {
+                        Text("/ \(summary.budget.currencyString) (\(summary.percentage)%)")
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Edit this card's cycle budget")
+
+                    Spacer()
+
+                    let tint = budgetStatusColor(summary.status)
+                    Button {
+                        openEditor()
+                    } label: {
+                        Text(summary.diffBadgeText)
+                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(tint)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(tint.opacity(0.14), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Edit this card's cycle budget")
+                } else {
+                    Spacer()
+
+                    Button("Set cycle budget →") {
+                        openEditor()
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+            .popover(isPresented: $showingEditor, arrowEdge: .top) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("CYCLE BUDGET FOR THIS CARD")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+
+                    HStack(spacing: 8) {
+                        TextField("20000.00", text: $budgetInput)
+                            .font(.system(size: 13, design: .monospaced))
+                            .textFieldStyle(.plain)
+                            .padding(7)
+                            .background(Color.primary.opacity(0.06))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .frame(width: 130)
+                            .onChange(of: budgetInput) { _, value in
+                                let filtered = value.amountInputFiltered
+                                if filtered != budgetInput { budgetInput = filtered }
+                            }
+                            .onSubmit {
+                                onSaveBudget(Double(budgetInput) ?? 0)
+                                showingEditor = false
+                            }
+
+                        Button("Save") {
+                            onSaveBudget(Double(budgetInput) ?? 0)
+                            showingEditor = false
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+
+                        if summary.isConfigured {
+                            Button("Clear") {
+                                onSaveBudget(0)
+                                showingEditor = false
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                    }
+                }
+                .padding(14)
+            }
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 10)
-        // Raise the hovered row above its neighbors so its tooltip draws on top.
-        .zIndex(hovering ? 1 : 0)
-        .animation(.easeInOut(duration: 0.1), value: hovering)
     }
-}
 
-/// The little floating label showing a category's name on hover.
-private struct CategoryTooltip: View {
-    let name: String
-
-    var body: some View {
-        Text(name)
-            .font(.system(size: 11, design: .monospaced))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            // `.ultraThinMaterial` is a translucent, blurred system background.
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .strokeBorder(Color.secondary.opacity(0.3))
-            )
-            .shadow(color: .black.opacity(0.2), radius: 4, y: 2)
-    }
-}
-
-// MARK: - Total Row
-
-/// The bold "TOTAL ........ $X" row pinned under the list.
-private struct TotalRow: View {
-    let total: Double
-
-    var body: some View {
-        HStack {
-            Text("TOTAL")
-                .font(.system(size: 14, weight: .semibold, design: .monospaced))
-            Spacer()
-            Text(total.currencyString)
-                .font(.system(size: 14, weight: .semibold, design: .monospaced))
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
-    }
-}
-
-// MARK: - Day Header (collapsible)
-
-/// A tappable day header in the list view: chevron + date + transaction count on
-/// the left, the day's total on the right. Tapping toggles the day open/closed.
-private struct DayHeaderRow: View {
-    let group: DashboardViewModel.DayGroup
-    let isExpanded: Bool
-    let onTap: () -> Void   // called when the header is tapped
-
-    var body: some View {
-        HStack(spacing: 10) {
-            // The chevron points right when collapsed, down when expanded.
-            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .frame(width: 10)
-
-            Text(group.date.dayHeaderString)
-                .font(.system(.body, design: .monospaced))
-
-            // Number of transactions that day, e.g. "(4)".
-            Text("(\(group.rows.count))")
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
-
-            Spacer()
-
-            // The day's total, shown even when collapsed so the summary is useful.
-            Text(group.total.currencyString)
-                .font(.system(.body, design: .monospaced))
-                .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 8)
-        .background(Color.primary.opacity(0.04))   // subtle shading to read as a header
-        .contentShape(Rectangle())                 // whole bar is tappable
-        .onTapGesture { onTap() }
+    private func openEditor() {
+        budgetInput = summary.isConfigured ? String(Int(summary.budget)) : ""
+        showingEditor = true
     }
 }
 

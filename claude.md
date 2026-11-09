@@ -63,15 +63,24 @@ The owner is new to Swift. Whenever you write or edit code, comment it to teach,
 What actually exists in the code today:
 - **Onboarding**: add cards (name, bank, last 4, type, fecha de corte) + create categories.
 - **Manual entry**: add / edit / delete transactions, including monthly installments (MSI).
-  The Add sheet supports "Add Another" for bulk entry and closes without saving via ✕ / Esc.
-  Its date is picked from a large always-visible calendar (`DayGridPicker`, one click per
-  day, cursor then jumps to AMOUNT) with quick-jump presets (`Today`, `Yesterday`,
-  `Last Week`, `Last Month`).
+  The Add and Edit sheets share `TransactionFormContent`: a two-column layout with a large
+  always-visible calendar (`DayGridPicker`, one click per day, cursor then jumps to AMOUNT),
+  quick-jump presets (`Today`, `Yesterday`, `Last Week`, `Last Month`), and a smart MSI field
+  (`6` or `3/6`) that automatically back-dates mid-stream MSI purchases by `-(current - 1)`
+  months and multiplies the entered monthly payment by `total` (`$500 × 6 = $3,000`) via
+  `InstallmentPlan`. Both sheets close without saving via ✕ / Esc, and the Add sheet supports
+  "Add Another" for bulk entry.
 - **Dashboard** (per card):
   - Period selector: **billing cycle (fecha de corte) or calendar month**, with ◀ ▶ nav.
-  - **List / Chart** toggle. List groups by day (collapsible); Chart shows a per-category
-    breakdown with % + bar, and each category expands to its charges.
-  - Running total; tap any charge to edit.
+  - **List / Chart** toggle. List groups transactions into always-open daily cards
+    (`LedgerListView`) with relative `TODAY` / `YESTERDAY` headers, left emoji avatars,
+    aligned category columns, and split dollar/cents typography (`SplitAmountText`);
+    Chart shows a per-category breakdown with % + bar, and each category expands to
+    its charges.
+  - Running total + per-card cycle budget footer bar (`BudgetFooterBarView` + `BudgetSummary`):
+    shows `TOTAL $Spent / $Budget (N%)`, a slim progress bar, a color-coded diff badge
+    (`+$X left` / `-$X over`), and an inline popover to set or edit the card's budget.
+    Tap any charge to edit.
   - "+ Add" button in the toolbar (labeled, accent-colored), and a large
     "Add Transaction" button in the empty state when a period has no charges.
   - **Drag & drop PDF import**: drop a statement onto the transaction list → `PDFService`
@@ -94,6 +103,7 @@ What actually exists in the code today:
 - type: String (credit | debit)
 - bank: String
 - closingDay: Int — statement closing day / fecha de corte (1–31; 0 = none, e.g. debit)
+- monthlyBudget: Double — optional per-card target budget per billing cycle / month (0 = none)
 
 ### Statement
 - id: String (UUID)
@@ -134,7 +144,7 @@ What actually exists in the code today:
 ## App Screens
 1. **Onboarding** — first launch only: add cards (incl. fecha de corte), create categories
 2. **Dashboard** — per-card; billing-cycle/month selector, List/Chart toggle, breakdown by
-   category, collapsible day groups, CSV export, add/edit/delete transactions (incl. MSI),
+   category, daily ledger cards, CSV export, add/edit/delete transactions (incl. MSI),
    drag & drop PDF import → review → save
 3. **Review** — shown as a sheet after a successful import; edit/delete parsed rows, pick
    the target card, Save All
@@ -226,6 +236,7 @@ before touching this code again:
 - **Realm schema versions** (`RealmService.swift`, bump `schemaVersion` on any model change):
   - v1 — added `Card.closingDay`
   - v2 — added `Transaction.installments`
+  - v3 — added `Card.monthlyBudget`
 - **Sandbox entitlements** (`Tabularium.entitlements`): app-sandbox, user-selected file
   read-write (CSV export / future import), and network client (for the local LLM).
 - Billing-cycle rule: installment/period math treats the **fecha de corte as the FIRST day**

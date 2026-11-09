@@ -15,7 +15,8 @@ struct EditCardSheet: View {
     @State private var bank: String = ""
     @State private var lastFour: String = ""
     @State private var type: String = "credit"
-    @State private var closingDay: String = ""   // optional; blank = no corte
+    @State private var closingDay: String = ""      // optional; blank = no corte
+    @State private var monthlyBudget: String = ""   // optional; blank or 0 = no budget
     // Guards against re-loading the fields on every re-render (load once, on appear).
     @State private var loaded = false
 
@@ -57,6 +58,14 @@ struct EditCardSheet: View {
                         .onChange(of: closingDay) { _, value in
                             let digits = String(value.filter(\.isNumber).prefix(2))
                             if digits != closingDay { closingDay = digits }
+                        }
+                }
+
+                field(label: "MONTHLY BUDGET (OPTIONAL)") {
+                    input("20000.00", text: $monthlyBudget)
+                        .onChange(of: monthlyBudget) { _, value in
+                            let filtered = value.amountInputFiltered
+                            if filtered != monthlyBudget { monthlyBudget = filtered }
                         }
                 }
 
@@ -120,8 +129,9 @@ struct EditCardSheet: View {
         bank = card.bank
         lastFour = card.lastFour
         type = card.type
-        // Show an empty field rather than "0" when the card has no corte.
+        // Show an empty field rather than "0" when the card has no corte or budget.
         closingDay = card.closingDay >= 1 ? String(card.closingDay) : ""
+        monthlyBudget = card.monthlyBudget > 0 ? String(card.monthlyBudget) : ""
         loaded = true
     }
 
@@ -137,6 +147,11 @@ struct EditCardSheet: View {
                 card.closingDay = day
             } else {
                 card.closingDay = 0
+            }
+            if let budget = Double(monthlyBudget), budget > 0 {
+                card.monthlyBudget = budget
+            } else {
+                card.monthlyBudget = 0
             }
         }
         dismiss()

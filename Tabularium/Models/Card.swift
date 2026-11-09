@@ -32,4 +32,8 @@ class Card: Object, Identifiable {
     // `0` means "no closing day" (typical for debit cards), in which case the
     // dashboard falls back to whole calendar months.
     @Persisted var closingDay: Int = 0
+
+    // Optional target budget per billing cycle / month for this card.
+    // `0` means "no budget set". Added in Realm schema v3.
+    @Persisted var monthlyBudget: Double = 0.0
 }

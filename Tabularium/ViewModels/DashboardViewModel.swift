@@ -117,12 +117,29 @@ class DashboardViewModel: ObservableObject {
         return anchorDate.monthYearString
     }
 
+    /// Budget vs. current period spending summary for the selected card.
+    var budgetSummary: BudgetSummary {
+        BudgetSummary(spent: total, budget: selectedCard?.monthlyBudget ?? 0)
+    }
+
+    /// Updates the selected card's monthly/cycle budget in Realm and refreshes.
+    func updateSelectedCardBudget(_ newBudget: Double) {
+        guard let cardId = selectedCard?.id else { return }
+        let clamped = max(0, newBudget)
+        RealmService.shared.update(Card.self, id: cardId) { card in
+            card.monthlyBudget = clamped
+        }
+        load()
+    }
+
     /// Called when the dashboard appears. Loads cards and picks a default one.
     func load() {
         cards = RealmService.shared.objects(Card.self)
-        // Only choose a default the first time (when nothing is selected yet),
-        // so we don't override the user's choice on every reload.
-        if selectedCard == nil {
+        // Refresh `selectedCard` from the latest Realm snapshot so edits (like
+        // `closingDay` or `monthlyBudget`) are reflected immediately.
+        if let currentId = selectedCard?.id {
+            selectedCard = cards.first(where: { $0.id == currentId }) ?? cards.first
+        } else {
             selectedCard = cards.first   // `.first` is nil-safe: nil if there are no cards
             if let card = selectedCard {
                 // Remember the choice so other screens can read it later.
