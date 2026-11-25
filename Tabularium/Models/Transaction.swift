@@ -29,4 +29,13 @@ class Transaction: Object, Identifiable {
     // purchase `date`; each later cycle shows 2/N, 3/N, … The per-cycle occurrences
     // are computed on the fly (see DashboardViewModel) — we don't store N rows.
     @Persisted var installments: Int = 1
+
+    // Reimbursement / budget-exclusion fields (schema v4):
+    // - `reimbursementStatus`: `"personal"` (100% mine, default), `"excluded"` (Option 1),
+    //   `"pending"` / `"reimbursed"` (Option 2), or `"split"` (Option 3).
+    // - `reimbursementNote`: optional label for who owes or pays it (e.g. `"Mamá"`, `"Trabajo"`).
+    // - `personalShareAmount`: for `"split"`, the user's personal share of `amount` (`0` otherwise).
+    @Persisted var reimbursementStatus: String = "personal"
+    @Persisted var reimbursementNote: String = ""
+    @Persisted var personalShareAmount: Double = 0.0
 }

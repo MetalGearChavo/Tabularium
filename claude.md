@@ -62,25 +62,33 @@ The owner is new to Swift. Whenever you write or edit code, comment it to teach,
 ## Current Status (implemented)
 What actually exists in the code today:
 - **Onboarding**: add cards (name, bank, last 4, type, fecha de corte) + create categories.
-- **Manual entry**: add / edit / delete transactions, including monthly installments (MSI).
-  The Add and Edit sheets share `TransactionFormContent`: a two-column layout with a large
-  always-visible calendar (`DayGridPicker`, one click per day, cursor then jumps to AMOUNT),
-  quick-jump presets (`Today`, `Yesterday`, `Last Week`, `Last Month`), and a smart MSI field
-  (`6` or `3/6`) that automatically back-dates mid-stream MSI purchases by `-(current - 1)`
-  months and multiplies the entered monthly payment by `total` (`$500 × 6 = $3,000`) via
-  `InstallmentPlan`. Both sheets close without saving via ✕ / Esc, and the Add sheet supports
-  "Add Another" for bulk entry.
+- **Manual entry**: add / edit / delete transactions, including monthly installments (MSI)
+  and reimbursable charges (`ReimbursementPicker` + `ReimbursementOption`: `Personal`,
+  `⏳ Pending`, `✓ Reimbursed`, plus a `WHO / NOTE` label). The Add and Edit sheets share
+  `TransactionFormContent`: a two-column layout with a large always-visible calendar
+  (`DayGridPicker`, one click per day, cursor then jumps to AMOUNT), quick-jump presets
+  (`Today`, `Yesterday`, `Last Week`, `Last Month`), an interactive category dropdown
+  (`CategoryDropdownPicker` + `InlineCategoryDraft`) with hover trash delete and a bottom
+  `+ Add category` row that transforms in place into an emoji picker + name text field,
+  and a smart MSI field (`6` or `3/6`) that automatically back-dates mid-stream MSI
+  purchases by `-(current - 1)` months and multiplies the entered monthly payment by
+  `total` (`$500 × 6 = $3,000`) via `InstallmentPlan`. Both sheets close without saving
+  via ✕ / Esc, and the Add sheet supports "Add Another" for bulk entry.
 - **Dashboard** (per card):
-  - Period selector: **billing cycle (fecha de corte) or calendar month**, with ◀ ▶ nav.
-  - **List / Chart** toggle. List groups transactions into always-open daily cards
-    (`LedgerListView`) with relative `TODAY` / `YESTERDAY` headers, left emoji avatars,
-    aligned category columns, and split dollar/cents typography (`SplitAmountText`);
+  - Period selector: **billing cycle (fecha de corte) or calendar month**, with fixed-position
+    ◀ ▶ nav arrows and a `[ ↩ Today ]` pill that appears whenever viewing a past/future period.
+  - **List / Chart** toggle + **`SORT: ↓ Newest / ↑ Oldest`** sub-bar menu (`TransactionSortOrder`).
+    List groups transactions into always-open daily cards (`LedgerListView`) with relative
+    `TODAY` / `YESTERDAY` headers, left emoji avatars, clickable `⏳` / `✓` reimbursement
+    status pills, aligned category columns, and split dollar/cents typography (`SplitAmountText`);
     Chart shows a per-category breakdown with % + bar, and each category expands to
     its charges.
   - Running total + per-card cycle budget footer bar (`BudgetFooterBarView` + `BudgetSummary`):
-    shows `TOTAL $Spent / $Budget (N%)`, a slim progress bar, a color-coded diff badge
-    (`+$X left` / `-$X over`), and an inline popover to set or edit the card's budget.
-    Tap any charge to edit.
+    shows `MY SPEND $PersonalSpent / $Budget (N%)`, a slim progress bar, a central
+    `💳 Pay Card: $StatementTotal ⓘ` pill (when reimbursable charges exist, opening a
+    popover receipt breakdown of personal spend vs. pending/paid reimbursements), a
+    color-coded diff badge (`+$X left` / `-$X over`), and an inline popover to set or
+    edit the card's budget. Tap any charge to edit.
   - "+ Add" button in the toolbar (labeled, accent-colored), and a large
     "Add Transaction" button in the empty state when a period has no charges.
   - **Drag & drop PDF import**: drop a statement onto the transaction list → `PDFService`
@@ -124,6 +132,10 @@ What actually exists in the code today:
 - categoryId: String
 - reviewed: Bool
 - installments: Int — 1 = single charge; N ≥ 2 = monthly installments (MSI)
+- reimbursementStatus: String — `"personal"` (100% mine, default), `"excluded"` (Option 1),
+  `"pending"` / `"reimbursed"` (Option 2), or `"split"` (Option 3)
+- reimbursementNote: String — optional label for who owes or pays it (e.g. `"Trabajo"`, `"Viaje"`)
+- personalShareAmount: Double — for `"split"`, the user's personal share of `amount` (`0` otherwise)
 
 ### Category
 - id: String (UUID)
@@ -237,6 +249,7 @@ before touching this code again:
   - v1 — added `Card.closingDay`
   - v2 — added `Transaction.installments`
   - v3 — added `Card.monthlyBudget`
+  - v4 — added `Transaction.reimbursementStatus`, `reimbursementNote`, and `personalShareAmount`
 - **Sandbox entitlements** (`Tabularium.entitlements`): app-sandbox, user-selected file
   read-write (CSV export / future import), and network client (for the local LLM).
 - Billing-cycle rule: installment/period math treats the **fecha de corte as the FIRST day**

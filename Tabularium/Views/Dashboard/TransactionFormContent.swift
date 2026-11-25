@@ -14,8 +14,16 @@ struct TransactionFormContent: View {
     @Binding var description: String
     @Binding var selectedCategoryId: String
     @Binding var monthsText: String
+    @Binding var reimbursementStatus: ReimbursementOption.Status
+    @Binding var reimbursementNote: String
 
     let categories: [Category]
+    /// Callback invoked when the user creates a new category inline from inside the
+    /// `CATEGORY` dropdown (`(emoji, name)`).
+    let onAddCategory: (String, String) -> Void
+    /// Callback invoked when the user clicks the hover trash icon on a category row
+    /// inside the `CATEGORY` dropdown (`categoryId`).
+    var onDeleteCategory: ((String) -> Void)? = nil
 
     // `@FocusState.Binding` lets the parent sheet pass its `@FocusState` down so
     // both the parent (e.g. after "Add Another") and this view (when a calendar day
@@ -68,7 +76,7 @@ struct TransactionFormContent: View {
                 focusedField.wrappedValue = .amount
             }
 
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 12) {
                 field(label: "DATE") {
                     Text(date.longDayString)
                         .font(.system(size: 14, weight: .medium, design: .monospaced))
@@ -103,14 +111,16 @@ struct TransactionFormContent: View {
                 }
 
                 field(label: "CATEGORY") {
-                    Picker("", selection: $selectedCategoryId) {
-                        Text("None").tag("")
-                        ForEach(categories) { cat in
-                            Text("\(cat.emoji) \(cat.name)").tag(cat.id)
-                        }
-                    }
-                    .labelsHidden()
+                    CategoryDropdownPicker(
+                        selectedCategoryId: $selectedCategoryId,
+                        categories: categories,
+                        onAddCategory: onAddCategory,
+                        onDeleteCategory: onDeleteCategory
+                    )
                 }
+                // Raise CATEGORY above the MSI field below it so the floating
+                // dropdown menu draws on top of `MONTHS · MSI` when opened.
+                .zIndex(10)
 
                 field(label: "MONTHS · MSI (e.g. 6 or 3/6)") {
                     VStack(alignment: .leading, spacing: 6) {
@@ -140,6 +150,11 @@ struct TransactionFormContent: View {
                         }
                     }
                 }
+
+                ReimbursementPicker(
+                    status: $reimbursementStatus,
+                    note: $reimbursementNote
+                )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }

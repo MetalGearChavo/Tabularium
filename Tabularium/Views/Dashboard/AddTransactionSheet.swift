@@ -5,6 +5,10 @@ import SwiftUI
 /// Uses the shared `TransactionFormContent` (calendar + form fields) so adding and editing
 /// a transaction share the exact same UI.
 struct AddTransactionSheet: View {
+    // Explicit card ID passed by `DashboardView` (falls back to `@AppStorage` or
+    // the first saved card in Realm so a saved charge is never orphaned with `""`).
+    var cardId: String? = nil
+
     // Reads which card is currently selected (saved by the dashboard).
     @AppStorage("selectedCardId") private var selectedCardId = ""
 
@@ -17,6 +21,8 @@ struct AddTransactionSheet: View {
     @State private var description: String = ""
     @State private var selectedCategoryId: String = ""
     @State private var monthsText: String = "1"       // smart MSI field: "1", "6" (1/6), or "3/6"
+    @State private var reimbursementStatus: ReimbursementOption.Status = .personal
+    @State private var reimbursementNote: String = ""
 
     // How many transactions we've saved so far without closing the sheet, so we can
     // show a "N added" hint during a bulk entry session. `@State` because it's UI-only.
@@ -27,8 +33,9 @@ struct AddTransactionSheet: View {
     // so the user can immediately type the next charge without reaching for the mouse.
     @FocusState private var focusedField: TransactionFormContent.Field?
 
-    // Computed properties (recalculated each time they're read):
-    private var categories: [Category] { RealmService.shared.objects(Category.self) }
+    // Categories loaded from Realm into `@State` so adding a new category inline
+    // inside the dropdown immediately refreshes the picker list.
+    @State private var categories: [Category] = []
     // Form is valid only if amount is a real number and description isn't blank.
     private var isValid: Bool { !amountText.isEmpty && Double(amountText) != nil && !description.isEmpty }
 
@@ -38,7 +45,7 @@ struct AddTransactionSheet: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
+        VStack(alignment: .leading, spacing: 18) {
             HStack {
                 Text("Add Transaction")
                     .font(.system(size: 16, weight: .semibold, design: .monospaced))
@@ -78,39 +85,103 @@ struct AddTransactionSheet: View {
                 description: $description,
                 selectedCategoryId: $selectedCategoryId,
                 monthsText: $monthsText,
+                reimbursementStatus: $reimbursementStatus,
+                reimbursementNote: $reimbursementNote,
                 categories: categories,
+                onAddCategory: addCategory,
+                onDeleteCategory: deleteCategory,
                 focusedField: $focusedField
             )
+            // Keep the form (and its floating CATEGORY dropdown overlay) layered
+            // above the footer buttons (`Cancel`, `Add Another`, `Save`).
+            .zIndex(10)
 
-            Spacer()
-
-            HStack {
-                // Saves the current entry and closes the sheet — the normal "I'm done"
-                // action. A blank form keeps it disabled; to leave without saving, use
-                // the ✕ in the header (or Esc).
-                Button("Save") { save(keepOpen: false) }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                    .disabled(!isValid)
-                    .opacity(isValid ? 1 : 0.4)
+            HStack(spacing: 12) {
+                // Cancel button on the left so the user has an obvious way out
+                // alongside the ✕ in the top corner.
+                Button {
+                    dismiss()
+                } label: {
+                    Text("Cancel")
+                        .font(.system(size: 13, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
 
                 Spacer()
 
                 // Saves the current entry but KEEPS the sheet open with the same date,
                 // so you can enter a whole day's charges without re-picking the date.
-                Button("Add Another") { save(keepOpen: true) }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
-                    .disabled(!isValid)              // grey out until the form is valid
-                    .opacity(isValid ? 1 : 0.4)      // and visually dim it
+                Button {
+                    save(keepOpen: true)
+                } label: {
+                    Text("Add Another")
+                        .font(.system(size: 13, weight: .medium, design: .monospaced))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(Color.primary.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!isValid)
+                .opacity(isValid ? 1 : 0.4)
+
+                // Saves the current entry and closes the sheet — the primary action
+                // when adding a single transaction. `.contentShape(Rectangle())`
+                // guarantees the entire padded button area registers the click even
+                // while a TextField has active keyboard focus.
+                Button {
+                    save(keepOpen: false)
+                } label: {
+                    Text("Save")
+                        .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Color(nsColor: .windowBackgroundColor))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 7)
+                        .background(Color.primary)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!isValid)
+                .opacity(isValid ? 1 : 0.4)
             }
         }
-        .padding(28)
+        .padding(22)
         .frame(width: TransactionFormContent.sheetWidth)
-        // When the sheet appears, default the category picker to the first category.
+        .fixedSize(horizontal: false, vertical: true)
+        .background(WindowDragEnablingView())
+        // When the sheet appears, load categories and default to the first one.
         .onAppear {
+            categories = RealmService.shared.objects(Category.self)
             selectedCategoryId = categories.first?.id ?? ""
             focusedField = .amount   // start with the cursor on AMOUNT, ready to type
+        }
+    }
+
+    /// Saves a newly created category to Realm, reloads the category list, and
+    /// immediately selects it for the current transaction.
+    private func addCategory(emoji: String, name: String) {
+        let category = Category()
+        category.emoji = emoji
+        category.name = name
+        RealmService.shared.save(category)
+        categories = RealmService.shared.objects(Category.self)
+        selectedCategoryId = category.id
+    }
+
+    /// Deletes a category directly from the dropdown's hover trash button, reloads
+    /// the category list, and falls back to the first remaining category (or `""`)
+    /// if the deleted category was currently selected.
+    private func deleteCategory(id: String) {
+        RealmService.shared.delete(Category.self, id: id)
+        categories = RealmService.shared.objects(Category.self)
+        if selectedCategoryId == id {
+            selectedCategoryId = categories.first?.id ?? ""
         }
     }
 
@@ -121,11 +192,21 @@ struct AddTransactionSheet: View {
     ///   and MSI count carry over so a run of same-day charges is fast to enter. When
     ///   `false` (the "Save" button), the sheet closes as before.
     private func save(keepOpen: Bool) {
-        // `Double(amountText)` returns an optional (nil if the text isn't a number).
-        // `guard` bails out safely if parsing fails.
-        guard let amount = Double(amountText) else { return }
+        // Parse the entered amount safely (trimming any accidental spaces).
+        let cleanAmount = amountText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let amount = Double(cleanAmount) else { return }
+
+        // Resolve the target card: explicit `cardId` from DashboardView → `@AppStorage`
+        // `selectedCardId` → first card in Realm. This prevents saving a charge with
+        // an empty `cardId` that wouldn't appear in the dashboard filter.
+        let resolvedCardId: String = {
+            if let explicit = cardId, !explicit.isEmpty { return explicit }
+            if !selectedCardId.isEmpty { return selectedCardId }
+            return RealmService.shared.objects(Card.self).first?.id ?? ""
+        }()
+
         let transaction = Transaction()
-        transaction.cardId = selectedCardId
+        transaction.cardId = resolvedCardId
         // If the user entered a mid-stream MSI (e.g. 3/6 on Nov 7 with $500), shift the
         // stored purchase date back by -(current - 1) months (Sep 7) and multiply the
         // monthly payment ($500 × 6 = $3,000) so every period shows $500 / mes.
@@ -135,6 +216,10 @@ struct AddTransactionSheet: View {
         transaction.categoryId = selectedCategoryId
         transaction.reviewed = true   // manually added → already "reviewed"
         transaction.installments = plan.total   // 1 = single charge; 2+ = MSI (amount is the total)
+        transaction.reimbursementStatus = reimbursementStatus.rawValue
+        transaction.reimbursementNote = reimbursementStatus == .personal
+            ? ""
+            : reimbursementNote.trimmingCharacters(in: .whitespacesAndNewlines)
         RealmService.shared.save(transaction)
         savedCount += 1
 
@@ -143,6 +228,8 @@ struct AddTransactionSheet: View {
             amountText = ""
             description = ""
             monthsText = "1"
+            reimbursementStatus = .personal
+            reimbursementNote = ""
             focusedField = .amount   // put the cursor back on AMOUNT to type the next charge
         } else {
             dismiss()

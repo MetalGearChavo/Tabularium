@@ -25,9 +25,11 @@ class RealmService {
     //   v1 — added `Card.closingDay` (statement closing day / fecha de corte).
     //   v2 — added `Transaction.installments` (monthly installments / MSI).
     //   v3 — added `Card.monthlyBudget` (per-card monthly/cycle target budget).
+    //   v4 — added `Transaction.reimbursementStatus`, `reimbursementNote`, and
+    //        `personalShareAmount` (budget exclusion / reimbursement / split share).
     private init() {
         var config = Realm.Configuration.defaultConfiguration
-        config.schemaVersion = 3
+        config.schemaVersion = 4
         Realm.Configuration.defaultConfiguration = config
     }
 

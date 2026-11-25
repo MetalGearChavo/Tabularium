@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// The root view. It decides what the user sees first: the onboarding wizard on
 /// a fresh install, or the main app once setup is done.
@@ -11,10 +12,36 @@ struct ContentView: View {
     // Every SwiftUI View describes its UI in `body`. `some View` means "some
     // specific view type I don't need to name".
     var body: some View {
-        if hasCompletedOnboarding {
-            MainView()
-        } else {
-            OnboardingView()
+        Group {
+            if hasCompletedOnboarding {
+                MainView()
+            } else {
+                OnboardingView()
+            }
+        }
+        .background(WindowDragEnablingView())
+    }
+}
+
+/// View layer (AppKit helper): enables `isMovableByWindowBackground = true` on the
+/// hosting `NSWindow` so the user can grab the top bar or any non-interactive
+/// background area of the window to drag it freely across the screen (away from
+/// the macOS Dock).
+struct WindowDragEnablingView: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = DragConfigView()
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        nsView.window?.isMovableByWindowBackground = true
+    }
+
+    final class DragConfigView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            window?.isMovableByWindowBackground = true
+            window?.sheetParent?.isMovableByWindowBackground = true
         }
     }
 }
@@ -52,6 +79,7 @@ private struct MainView: View {
             case nil:        DashboardView()   // nothing selected → default to dashboard
             }
         }
+        .frame(minWidth: 920, minHeight: 540)
     }
 }
 

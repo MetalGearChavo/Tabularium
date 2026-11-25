@@ -125,7 +125,7 @@ struct DashboardView: View {
         .sheet(isPresented: $showingAddTransaction) {
             vm.load()
         } content: {
-            AddTransactionSheet()
+            AddTransactionSheet(cardId: vm.selectedCard?.id)
         }
         // `.sheet(item:)` opens whenever `editingRow` becomes non-nil (i.e. a row was
         // tapped) and passes that row in. We reload on dismiss to reflect any edits.
@@ -206,9 +206,16 @@ struct DashboardView: View {
                 case .list:
                     // `ScrollView` makes its contents scrollable when they overflow.
                     ScrollView {
-                        LedgerListView(dayGroups: vm.dayGroups) { row in
-                            editingRow = row
-                        }
+                        LedgerListView(
+                            vm: vm,
+                            dayGroups: vm.dayGroups,
+                            onSelectRow: { row in
+                                editingRow = row
+                            },
+                            onToggleReimbursement: { row in
+                                vm.toggleReimbursementStatus(transactionId: row.id)
+                            }
+                        )
                     }
                 case .chart:
                     DistributionView(slices: vm.breakdown) { row in
@@ -220,6 +227,9 @@ struct DashboardView: View {
 
                 BudgetFooterBarView(
                     summary: vm.budgetSummary,
+                    statementTotal: vm.statementTotal,
+                    pendingReimbursementTotal: vm.pendingReimbursementTotal,
+                    reimbursedTotal: vm.reimbursedTotal,
                     onSaveBudget: { vm.updateSelectedCardBudget($0) }
                 )
             }
@@ -281,10 +291,11 @@ private struct HeaderBar: View {
     @ObservedObject var vm: DashboardViewModel
 
     var body: some View {
-        // `HStack` lays children out left-to-right.
+        // `HStack` lays children out left-to-right with breathing room (`spacing: 16`)
+        // between Cycle/Month, List/Chart, and the period navigator.
         HStack(spacing: 16) {
             CardPicker(vm: vm)
-            Spacer()        // flexible gap that pushes the two sides apart
+            Spacer(minLength: 16)
             // The Cycle/Month switch only makes sense for cards that have a corte.
             if vm.canUseBillingCycle {
                 PeriodModeToggle(vm: vm)
@@ -315,9 +326,11 @@ private struct CardPicker: View {
                 if let card = vm.selectedCard {
                     Text("\(card.name) ••••\(card.lastFour)")
                         .font(.system(.body, design: .monospaced))
+                        .lineLimit(1)
                 } else {
                     Text("No card selected")
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
                 Image(systemName: "chevron.down")
                     .font(.caption)
@@ -328,31 +341,67 @@ private struct CardPicker: View {
     }
 }
 
-/// Left/right arrows around the current period label. The label is either a month
-/// ("June 2026") or a billing cycle ("May 21 – Jun 20, 2026"), depending on the
-/// view model's `periodMode`.
+/// Left/right arrows around the current period label, plus a `[ ↩ Today ]` pill
+/// that appears whenever the user navigates away from the current billing cycle
+/// or calendar month.
 private struct MonthNav: View {
     @ObservedObject var vm: DashboardViewModel
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
+            if !vm.isViewingCurrentPeriod {
+                Button {
+                    vm.jumpToCurrentPeriod()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.uturn.backward")
+                            .font(.system(size: 10, weight: .bold))
+                        Text("Today")
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(Color.accentColor.opacity(0.14), in: Capsule())
+                    .overlay(
+                        Capsule()
+                            .strokeBorder(Color.accentColor.opacity(0.3), lineWidth: 1)
+                    )
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                // `.fixedSize()` prevents SwiftUI from ever squishing the pill into a
+                // tall vertical oval when the window is at a narrow/normal width.
+                .fixedSize()
+                .help("Jump back to the current period")
+            }
+
             Button { vm.previousPeriod() } label: {
                 Image(systemName: "chevron.left")
                     .font(.caption)
+                    .padding(4)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
             Text(vm.periodLabel)
-                .font(.system(.body, design: .monospaced))
-                // Wider than before to fit the longer billing-cycle label.
-                .frame(minWidth: 180, alignment: .center)
+                .font(.system(size: 13, design: .monospaced))
+                .lineLimit(1)
+                // Fixed width so both `◀` and `▶` arrows stay locked at the exact
+                // same pixel coordinate across short ("May 2026") and long
+                // ("Sep 21 – Oct 20, 2026") period labels — no chasing the arrow.
+                .frame(width: 176, alignment: .center)
 
             Button { vm.nextPeriod() } label: {
                 Image(systemName: "chevron.right")
                     .font(.caption)
+                    .padding(4)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
         }
+        .fixedSize()
     }
 }
 
@@ -374,7 +423,7 @@ private struct PeriodModeToggle: View {
         }
         .pickerStyle(.segmented)
         .labelsHidden()
-        .frame(width: 150)
+        .fixedSize()
     }
 }
 
@@ -393,7 +442,7 @@ private struct ViewModeToggle: View {
         }
         .pickerStyle(.segmented)
         .labelsHidden()
-        .frame(width: 130)
+        .fixedSize()
     }
 }
 
@@ -408,11 +457,52 @@ private struct ViewModeToggle: View {
 /// description (+ MSI pill), aligned category name column, and split `$890.00`
 /// dollar/cents typography with row hover highlighting.
 private struct LedgerListView: View {
+    @ObservedObject var vm: DashboardViewModel
     let dayGroups: [DashboardViewModel.DayGroup]
     let onSelectRow: (DashboardViewModel.TransactionRow) -> Void
+    let onToggleReimbursement: (DashboardViewModel.TransactionRow) -> Void
 
     var body: some View {
         VStack(spacing: 14) {
+            // Sub-bar sort menu directly above the transaction list (`SORT: ↓ Newest ▾`)
+            HStack {
+                Spacer()
+
+                Menu {
+                    ForEach(TransactionSortOrder.allCases) { order in
+                        Button {
+                            vm.setSortOrder(order)
+                        } label: {
+                            HStack {
+                                if vm.sortOrder == order {
+                                    Image(systemName: "checkmark")
+                                }
+                                Text("\(order == .newestFirst ? "↓" : "↑") \(order.shortLabel)")
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Text("SORT:")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                        Image(systemName: vm.sortOrder.iconName)
+                            .font(.system(size: 10, weight: .semibold))
+                        Text(vm.sortOrder.shortLabel)
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 5))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 4)
+
             ForEach(dayGroups) { group in
                 VStack(alignment: .leading, spacing: 6) {
                     // Day header with TODAY / YESTERDAY callout
@@ -443,9 +533,11 @@ private struct LedgerListView: View {
                     // Rounded day card with left emoji avatars, aligned categories, and split amounts
                     VStack(spacing: 0) {
                         ForEach(Array(group.rows.enumerated()), id: \.element.id) { index, row in
-                            LedgerTransactionRow(row: row) {
-                                onSelectRow(row)
-                            }
+                            LedgerTransactionRow(
+                                row: row,
+                                onTap: { onSelectRow(row) },
+                                onToggleReimbursement: { onToggleReimbursement(row) }
+                            )
 
                             if index < group.rows.count - 1 {
                                 Divider().opacity(0.25).padding(.leading, 56).padding(.trailing, 14)
@@ -483,6 +575,7 @@ private struct LedgerListView: View {
 private struct LedgerTransactionRow: View {
     let row: DashboardViewModel.TransactionRow
     let onTap: () -> Void
+    var onToggleReimbursement: (() -> Void)? = nil
 
     @State private var isHovering = false
 
@@ -497,6 +590,7 @@ private struct LedgerTransactionRow: View {
             HStack(spacing: 6) {
                 Text(row.description)
                     .lineLimit(1)
+                    .foregroundStyle(row.personalBudgetAmount == 0 ? .secondary : .primary)
                 if let label = row.installmentLabel {
                     Text(label)
                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
@@ -504,6 +598,22 @@ private struct LedgerTransactionRow: View {
                         .padding(.vertical, 1)
                         .background(Color.accentColor.opacity(0.18))
                         .clipShape(Capsule())
+                }
+                if let badge = row.reimbursementBadge {
+                    // Clicking the `⏳` / `✓` pill toggles Pending ↔ Reimbursed in place.
+                    Button {
+                        onToggleReimbursement?()
+                    } label: {
+                        Text(badge)
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(reimbursementBadgeColor(row.reimbursementStatus))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(reimbursementBadgeColor(row.reimbursementStatus).opacity(0.15))
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Click to toggle between ⏳ Pending and ✓ Reimbursed")
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -515,6 +625,8 @@ private struct LedgerTransactionRow: View {
                 .lineLimit(1)
                 .frame(width: 120, alignment: .leading)
 
+            // Always show the real amount charged on the card statement so the user
+            // can verify every charge against their bank statement.
             SplitAmountText(amount: row.amount)
                 .frame(width: 100, alignment: .trailing)
         }
@@ -524,6 +636,14 @@ private struct LedgerTransactionRow: View {
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
         .onTapGesture { onTap() }
+    }
+
+    private func reimbursementBadgeColor(_ status: ReimbursementOption.Status) -> Color {
+        switch status {
+        case .personal:   return .secondary
+        case .pending:    return .orange
+        case .reimbursed: return .green
+        }
     }
 }
 
@@ -563,15 +683,26 @@ private func budgetStatusColor(_ status: BudgetSummary.Status) -> Color {
     }
 }
 
-/// View layer: the bottom `TOTAL` bar with a top-edge progress bar, `TOTAL $Spent / $Budget (N%)`,
-/// a color-coded diff badge on the right (`+$X left` / `-$X over`), and an inline popover
-/// for setting or editing the selected card's cycle budget.
+/// View layer: the bottom budget & statement summary footer bar (`BudgetFooterBarView`).
+///
+/// Shows a top-edge progress bar, `MY SPEND $Spent / $Budget` on the left, a clickable
+/// `💳 Pay Card: $StatementTotal ⓘ` pill in the center (whenever the period includes
+/// reimbursable charges, opening a popover with the exact statement breakdown), and the
+/// color-coded budget remaining/over badge (`+$X left` / `-$X over`) on the right.
 private struct BudgetFooterBarView: View {
     let summary: BudgetSummary
+    var statementTotal: Double = 0
+    var pendingReimbursementTotal: Double = 0
+    var reimbursedTotal: Double = 0
     let onSaveBudget: (Double) -> Void
 
     @State private var showingEditor = false
+    @State private var showingStatementBreakdown = false
     @State private var budgetInput: String = ""
+
+    private var hasReimbursableCharges: Bool {
+        (pendingReimbursementTotal + reimbursedTotal) > 0
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -587,26 +718,103 @@ private struct BudgetFooterBarView: View {
                 .frame(height: 3)
             }
 
-            HStack(spacing: 10) {
-                Text("TOTAL")
-                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("MY SPEND")
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(summary.spent.currencyString)
+                            .font(.system(size: 15, weight: .bold, design: .monospaced))
+                        if summary.isConfigured {
+                            Button {
+                                openEditor()
+                            } label: {
+                                Text("/ \(summary.budget.currencyString) (\(summary.percentage)%)")
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Edit this card's cycle budget")
+                        }
+                    }
+                }
 
-                Text(summary.spent.currencyString)
-                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                Spacer()
 
-                if summary.isConfigured {
+                if hasReimbursableCharges {
                     Button {
-                        openEditor()
+                        showingStatementBreakdown.toggle()
                     } label: {
-                        Text("/ \(summary.budget.currencyString) (\(summary.percentage)%)")
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundStyle(.secondary)
+                        HStack(spacing: 6) {
+                            Image(systemName: "creditcard")
+                                .font(.system(size: 11))
+                            Text("Pay Card: \(statementTotal.currencyString)")
+                                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                            if pendingReimbursementTotal > 0 {
+                                Circle()
+                                    .fill(Color.orange)
+                                    .frame(width: 6, height: 6)
+                            }
+                            Image(systemName: "info.circle")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Color.primary.opacity(0.06), in: Capsule())
+                        .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)
-                    .help("Edit this card's cycle budget")
+                    .help("View statement payment breakdown")
+                    .popover(isPresented: $showingStatementBreakdown, arrowEdge: .top) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("STATEMENT BREAKDOWN")
+                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(.secondary)
 
-                    Spacer()
+                            HStack {
+                                Text("Your personal spend")
+                                Spacer()
+                                Text(summary.spent.currencyString)
+                                    .fontWeight(.medium)
+                            }
+                            if pendingReimbursementTotal > 0 {
+                                HStack {
+                                    Text("⏳ Pending reimbursement")
+                                        .foregroundStyle(.orange)
+                                    Spacer()
+                                    Text(pendingReimbursementTotal.currencyString)
+                                        .foregroundStyle(.orange)
+                                        .fontWeight(.medium)
+                                }
+                            }
+                            if reimbursedTotal > 0 {
+                                HStack {
+                                    Text("✓ Already reimbursed")
+                                        .foregroundStyle(.green)
+                                    Spacer()
+                                    Text(reimbursedTotal.currencyString)
+                                        .foregroundStyle(.green)
+                                        .fontWeight(.medium)
+                                }
+                            }
+                            Divider()
+                            HStack {
+                                Text("Total to pay card")
+                                    .fontWeight(.semibold)
+                                Spacer()
+                                Text(statementTotal.currencyString)
+                                    .fontWeight(.bold)
+                            }
+                        }
+                        .font(.system(size: 12, design: .monospaced))
+                        .padding(14)
+                        .frame(width: 280)
+                    }
+                }
 
+                if summary.isConfigured {
                     let tint = budgetStatusColor(summary.status)
                     Button {
                         openEditor()
@@ -615,67 +823,69 @@ private struct BudgetFooterBarView: View {
                             .font(.system(size: 12, weight: .semibold, design: .monospaced))
                             .foregroundStyle(tint)
                             .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
+                            .padding(.vertical, 5)
                             .background(tint.opacity(0.14), in: Capsule())
                     }
                     .buttonStyle(.plain)
                     .help("Edit this card's cycle budget")
                 } else {
-                    Spacer()
-
-                    Button("Set cycle budget →") {
-                        openEditor()
-                    }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    Button("Set cycle budget →") { openEditor() }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
                 }
             }
             .padding(.horizontal, 20)
-            .padding(.vertical, 12)
+            .padding(.vertical, 10)
             .popover(isPresented: $showingEditor, arrowEdge: .top) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("CYCLE BUDGET FOR THIS CARD")
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.secondary)
-
-                    HStack(spacing: 8) {
-                        TextField("20000.00", text: $budgetInput)
-                            .font(.system(size: 13, design: .monospaced))
-                            .textFieldStyle(.plain)
-                            .padding(7)
-                            .background(Color.primary.opacity(0.06))
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                            .frame(width: 130)
-                            .onChange(of: budgetInput) { _, value in
-                                let filtered = value.amountInputFiltered
-                                if filtered != budgetInput { budgetInput = filtered }
-                            }
-                            .onSubmit {
-                                onSaveBudget(Double(budgetInput) ?? 0)
-                                showingEditor = false
-                            }
-
-                        Button("Save") {
-                            onSaveBudget(Double(budgetInput) ?? 0)
-                            showingEditor = false
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-
-                        if summary.isConfigured {
-                            Button("Clear") {
-                                onSaveBudget(0)
-                                showingEditor = false
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                        }
-                    }
-                }
-                .padding(14)
+                budgetEditorPopover
             }
         }
+    }
+
+    // MARK: - Budget Editor Popover
+
+    private var budgetEditorPopover: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("CYCLE BUDGET FOR THIS CARD")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 8) {
+                TextField("20000.00", text: $budgetInput)
+                    .font(.system(size: 13, design: .monospaced))
+                    .textFieldStyle(.plain)
+                    .padding(7)
+                    .background(Color.primary.opacity(0.06))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .frame(width: 130)
+                    .onChange(of: budgetInput) { _, value in
+                        let filtered = value.amountInputFiltered
+                        if filtered != budgetInput { budgetInput = filtered }
+                    }
+                    .onSubmit {
+                        onSaveBudget(Double(budgetInput) ?? 0)
+                        showingEditor = false
+                    }
+
+                Button("Save") {
+                    onSaveBudget(Double(budgetInput) ?? 0)
+                    showingEditor = false
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+
+                if summary.isConfigured {
+                    Button("Clear") {
+                        onSaveBudget(0)
+                        showingEditor = false
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+        }
+        .padding(14)
     }
 
     private func openEditor() {

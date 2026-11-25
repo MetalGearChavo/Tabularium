@@ -26,10 +26,15 @@ class DashboardViewModel: ObservableObject {
         let emoji: String       // category emoji, or "·" if the category is gone
         let category: String    // category name, shown in the hover tooltip
         let description: String
-        let amount: Double      // the amount charged THIS period (a monthly part for MSI)
+        let amount: Double      // the amount charged THIS period on the card statement
+        let personalBudgetAmount: Double // the portion that counts toward the user's personal budget
         let date: Date
         // For a monthly-installment purchase, e.g. "3/12"; `nil` for a normal charge.
         let installmentLabel: String?
+        // Optional pill badge for non-personal / reimbursable / split charges, e.g.
+        // `"EXCLUDED"`, `"⏳ Viaje"`, `"✓ Trabajo"`, or `"SPLIT (mine $1,000.00)"`.
+        let reimbursementBadge: String?
+        let reimbursementStatus: ReimbursementOption.Status
     }
 
     /// How the dashboard groups transactions into a "period".
@@ -73,6 +78,10 @@ class DashboardViewModel: ObservableObject {
     @Published var selectedCard: Card?                       // the card being viewed (optional)
     @Published var periodMode: PeriodMode = .month           // billing cycle vs. month
     @Published var viewMode: ViewMode = .list                // list vs. chart
+    @Published var sortOrder: TransactionSortOrder = {
+        let raw = UserDefaults.standard.string(forKey: "transactionSortOrder") ?? ""
+        return TransactionSortOrder(rawValue: raw) ?? .newestFirst
+    }()
     @Published var breakdown: [CategorySlice] = []           // per-category slices (chart view)
     @Published var dayGroups: [DayGroup] = []                // transactions grouped by day (list view)
     // A date that sits inside the period currently being viewed. We move it back/
@@ -80,7 +89,10 @@ class DashboardViewModel: ObservableObject {
     // from it plus the selected `periodMode`.
     @Published var anchorDate: Date = Date()
     @Published var rows: [TransactionRow] = []               // the list the View renders
-    @Published var total: Double = 0                         // sum of `rows` amounts
+    @Published var total: Double = 0                         // sum of `personalBudgetAmount` (what counts toward budget)
+    @Published var statementTotal: Double = 0                // full amount to pay on the card statement this period
+    @Published var pendingReimbursementTotal: Double = 0     // sum of `⏳ Pending` charges this period
+    @Published var reimbursedTotal: Double = 0               // sum of `✓ Reimbursed` charges this period
 
     // MARK: - Derived period (start, end, label)
 
@@ -117,6 +129,19 @@ class DashboardViewModel: ObservableObject {
         return anchorDate.monthYearString
     }
 
+    /// `true` when the currently viewed period contains today (`Date()`), so we know
+    /// whether the user has navigated away to a past or future cycle/month.
+    var isViewingCurrentPeriod: Bool {
+        let now = Date()
+        return now >= periodStart && now < periodEnd
+    }
+
+    /// Jumps straight back to the current billing cycle or calendar month.
+    func jumpToCurrentPeriod() {
+        anchorDate = Date()
+        reload()
+    }
+
     /// Budget vs. current period spending summary for the selected card.
     var budgetSummary: BudgetSummary {
         BudgetSummary(spent: total, budget: selectedCard?.monthlyBudget ?? 0)
@@ -132,20 +157,41 @@ class DashboardViewModel: ObservableObject {
         load()
     }
 
+    /// Toggles a transaction's reimbursement status between `.pending` (`⏳`) and
+    /// `.reimbursed` (`✓`) when the user clicks the pill badge directly on a row.
+    func toggleReimbursementStatus(transactionId: String) {
+        guard let tx = RealmService.shared.object(Transaction.self, id: transactionId) else { return }
+        let current = ReimbursementOption(rawStatus: tx.reimbursementStatus, note: tx.reimbursementNote)
+        guard current.isReimbursable else { return }
+        let next = current.toggledStatus
+        RealmService.shared.update(Transaction.self, id: transactionId) { record in
+            record.reimbursementStatus = next.rawValue
+        }
+        reload()
+    }
+
     /// Called when the dashboard appears. Loads cards and picks a default one.
     func load() {
         cards = RealmService.shared.objects(Card.self)
         // Refresh `selectedCard` from the latest Realm snapshot so edits (like
         // `closingDay` or `monthlyBudget`) are reflected immediately.
+        let storedId = UserDefaults.standard.string(forKey: "selectedCardId") ?? ""
         if let currentId = selectedCard?.id {
             selectedCard = cards.first(where: { $0.id == currentId }) ?? cards.first
+        } else if !storedId.isEmpty, let remembered = cards.first(where: { $0.id == storedId }) {
+            selectedCard = remembered
+            applyDefaultPeriodMode()
         } else {
             selectedCard = cards.first   // `.first` is nil-safe: nil if there are no cards
-            if let card = selectedCard {
-                // Remember the choice so other screens can read it later.
-                UserDefaults.standard.set(card.id, forKey: "selectedCardId")
+            if selectedCard != nil {
                 applyDefaultPeriodMode()
             }
+        }
+        // Always keep `UserDefaults["selectedCardId"]` in sync with whichever card
+        // is actually shown on screen so sheets (`AddTransactionSheet`) never write
+        // to an empty or stale `cardId`.
+        if let card = selectedCard {
+            UserDefaults.standard.set(card.id, forKey: "selectedCardId")
         }
         reload()
     }
@@ -171,6 +217,14 @@ class DashboardViewModel: ObservableObject {
     /// from values `reload()` already computed (`rows` and `breakdown`).
     func setViewMode(_ mode: ViewMode) {
         viewMode = mode
+    }
+
+    /// Updates the transaction sort order (`newestFirst` vs. `oldestFirst`), persists
+    /// it in `UserDefaults`, and re-sorts the period's rows and day groups.
+    func setSortOrder(_ order: TransactionSortOrder) {
+        sortOrder = order
+        UserDefaults.standard.set(order.rawValue, forKey: "transactionSortOrder")
+        reload()
     }
 
     /// Picks the right default view for the selected card: billing cycle when the
@@ -200,7 +254,13 @@ class DashboardViewModel: ObservableObject {
     private func reload() {
         // No card selected → show nothing and stop early.
         guard let card = selectedCard else {
-            rows = []; total = 0; breakdown = []; dayGroups = []
+            rows = []
+            total = 0
+            statementTotal = 0
+            pendingReimbursementTotal = 0
+            reimbursedTotal = 0
+            breakdown = []
+            dayGroups = []
             return
         }
 
@@ -230,6 +290,10 @@ class DashboardViewModel: ObservableObject {
         for tx in RealmService.shared.objects(Transaction.self) where tx.cardId == card.id {
             let emoji = categoryMap[tx.categoryId]?.emoji ?? "·"
             let categoryName = categoryMap[tx.categoryId]?.name ?? "Uncategorized"
+            let reimbursement = ReimbursementOption(
+                rawStatus: tx.reimbursementStatus,
+                note: tx.reimbursementNote
+            )
 
             // Decide this transaction's contribution to the period (a monthly part for
             // an MSI purchase, or the full amount for a one-time charge), then build a
@@ -243,6 +307,7 @@ class DashboardViewModel: ObservableObject {
                 guard offset >= 0 && offset < tx.installments else { continue }
 
                 let monthly = tx.amount / Double(tx.installments)
+                let personalMonthly = reimbursement.budgetAmount(forPeriodCharge: monthly)
                 // Show it on the purchase's day-of-month shifted into this period's
                 // month, so it sorts and day-groups naturally within the period.
                 let shownDate = calendar.date(byAdding: .month, value: offset, to: tx.date) ?? tx.date
@@ -253,45 +318,63 @@ class DashboardViewModel: ObservableObject {
                     category: categoryName,
                     description: tx.transactionDescription,
                     amount: monthly,
+                    personalBudgetAmount: personalMonthly,
                     date: shownDate,
-                    installmentLabel: "\(offset + 1)/\(tx.installments)"
+                    installmentLabel: "\(offset + 1)/\(tx.installments)",
+                    reimbursementBadge: reimbursement.badgeLabel,
+                    reimbursementStatus: reimbursement.status
                 )
             } else {
                 // Normal one-time charge: include only if it falls inside the period.
                 guard tx.date >= start && tx.date < end else { continue }
+                let personalAmount = reimbursement.budgetAmount(forPeriodCharge: tx.amount)
                 row = TransactionRow(
                     id: tx.id,
                     emoji: emoji,
                     category: categoryName,
                     description: tx.transactionDescription,
                     amount: tx.amount,
+                    personalBudgetAmount: personalAmount,
                     date: tx.date,
-                    installmentLabel: nil
+                    installmentLabel: nil,
+                    reimbursementBadge: reimbursement.badgeLabel,
+                    reimbursementStatus: reimbursement.status
                 )
             }
 
             built.append(row)
-            categorySums[tx.categoryId, default: 0] += row.amount
-            categoryRows[tx.categoryId, default: []].append(row)
+            // Only count the personal budget share in the category breakdown chart
+            // so reimbursable charges don't skew personal category percentages.
+            if row.personalBudgetAmount > 0 {
+                categorySums[tx.categoryId, default: 0] += row.personalBudgetAmount
+                categoryRows[tx.categoryId, default: []].append(row)
+            }
         }
 
-        rows = built.sorted { $0.date < $1.date }   // oldest first (earliest on top)
-        total = rows.reduce(0) { $0 + $1.amount }
+        rows = sortOrder.sort(built, by: \.date)
+        total = rows.reduce(0) { $0 + $1.personalBudgetAmount }
+        statementTotal = rows.reduce(0) { $0 + $1.amount }
+        pendingReimbursementTotal = rows
+            .filter { $0.reimbursementStatus == .pending }
+            .reduce(0) { $0 + $1.amount }
+        reimbursedTotal = rows
+            .filter { $0.reimbursementStatus == .reimbursed }
+            .reduce(0) { $0 + $1.amount }
 
         // Group the rows by calendar day for the collapsible list. `Dictionary(grouping:)`
         // buckets the rows by the key we return — here the start of each row's day.
         let byDay = Dictionary(grouping: rows) { calendar.startOfDay(for: $0.date) }
-        dayGroups = byDay.map { day, dayRows in
+        let unsortedGroups = byDay.map { day, dayRows in
             DayGroup(
                 // A stable string key for this day, so the View can remember which
                 // days are expanded across reloads.
                 id: String(day.timeIntervalSinceReferenceDate),
                 date: day,
                 total: dayRows.reduce(0) { $0 + $1.amount },
-                rows: dayRows.sorted { $0.date < $1.date }
+                rows: sortOrder.sort(dayRows, by: \.date)
             )
         }
-        .sorted { $0.date < $1.date }   // oldest day first, matching the flat list
+        dayGroups = sortOrder.sort(unsortedGroups, by: \.date)
 
         // Turn the per-category tallies into chart slices with a fraction of the total.
         breakdown = categorySums.map { categoryId, amount in
@@ -302,7 +385,7 @@ class DashboardViewModel: ObservableObject {
                 name: category?.name ?? "Uncategorized",
                 amount: amount,
                 fraction: total != 0 ? amount / total : 0,
-                rows: (categoryRows[categoryId] ?? []).sorted { $0.date < $1.date }
+                rows: sortOrder.sort(categoryRows[categoryId] ?? [], by: \.date)
             )
         }
         .sorted { $0.amount > $1.amount }   // biggest spend first

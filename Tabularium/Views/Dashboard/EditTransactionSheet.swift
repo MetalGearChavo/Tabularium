@@ -21,13 +21,17 @@ struct EditTransactionSheet: View {
     @State private var description: String = ""
     @State private var selectedCategoryId: String = ""
     @State private var monthsText: String = "1"       // smart MSI field: "1", "6" (1/6), or "3/6"
+    @State private var reimbursementStatus: ReimbursementOption.Status = .personal
+    @State private var reimbursementNote: String = ""
     // Guards against re-loading the fields every time the view re-renders
     // (we only want to fill them from the database once, on first appearance).
     @State private var loaded = false
 
     @FocusState private var focusedField: TransactionFormContent.Field?
 
-    private var categories: [Category] { RealmService.shared.objects(Category.self) }
+    // Categories loaded into `@State` so adding a new category inline inside the
+    // dropdown immediately updates the available options.
+    @State private var categories: [Category] = []
     private var isValid: Bool { !amountText.isEmpty && Double(amountText) != nil && !description.isEmpty }
 
     /// The parsed MSI plan from `monthsText` (supports `"6"` → `1/6` or `"3/6"` → `3/6`).
@@ -36,7 +40,7 @@ struct EditTransactionSheet: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
+        VStack(alignment: .leading, spacing: 18) {
             HStack {
                 Text("Edit Transaction")
                     .font(.system(size: 16, weight: .semibold, design: .monospaced))
@@ -61,11 +65,16 @@ struct EditTransactionSheet: View {
                 description: $description,
                 selectedCategoryId: $selectedCategoryId,
                 monthsText: $monthsText,
+                reimbursementStatus: $reimbursementStatus,
+                reimbursementNote: $reimbursementNote,
                 categories: categories,
+                onAddCategory: addCategory,
+                onDeleteCategory: deleteCategory,
                 focusedField: $focusedField
             )
-
-            Spacer()
+            // Keep the form (and its floating CATEGORY dropdown overlay) layered
+            // above the footer buttons (`Delete`, `Cancel`, `Save`).
+            .zIndex(10)
 
             HStack {
                 Button("Delete") { delete() }
@@ -86,8 +95,10 @@ struct EditTransactionSheet: View {
                     .padding(.leading, 16)
             }
         }
-        .padding(28)
+        .padding(22)
         .frame(width: TransactionFormContent.sheetWidth)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(WindowDragEnablingView())
         // `perform:` runs this function when the view appears. (Same as `.onAppear { loadIfNeeded() }`.)
         .onAppear(perform: loadIfNeeded)
     }
@@ -95,6 +106,7 @@ struct EditTransactionSheet: View {
     /// Fetches the transaction from the database (once) and copies its values into
     /// the form fields so the user sees the current data.
     private func loadIfNeeded() {
+        categories = RealmService.shared.objects(Category.self)
         // `guard` chains two conditions: only proceed if we haven't loaded yet AND
         // the transaction actually exists. `tx` is the found record.
         guard !loaded, let tx = RealmService.shared.object(Transaction.self, id: transactionId) else { return }
@@ -110,7 +122,31 @@ struct EditTransactionSheet: View {
         description = tx.transactionDescription
         selectedCategoryId = tx.categoryId
         monthsText = seed.monthsText
+        let opt = ReimbursementOption(rawStatus: tx.reimbursementStatus, note: tx.reimbursementNote)
+        reimbursementStatus = opt.status
+        reimbursementNote = opt.note
         loaded = true
+    }
+
+    /// Saves a newly created category to Realm, reloads the category list, and
+    /// immediately selects it for the transaction being edited.
+    private func addCategory(emoji: String, name: String) {
+        let category = Category()
+        category.emoji = emoji
+        category.name = name
+        RealmService.shared.save(category)
+        categories = RealmService.shared.objects(Category.self)
+        selectedCategoryId = category.id
+    }
+
+    /// Deletes a category directly from the dropdown's hover trash button, reloads
+    /// the category list, and clears or updates the selection if it was active.
+    private func deleteCategory(id: String) {
+        RealmService.shared.delete(Category.self, id: id)
+        categories = RealmService.shared.objects(Category.self)
+        if selectedCategoryId == id {
+            selectedCategoryId = categories.first?.id ?? ""
+        }
     }
 
     /// Writes the edited values back onto the same record (by id), then closes.
@@ -125,6 +161,11 @@ struct EditTransactionSheet: View {
             tx.categoryId = selectedCategoryId
             tx.reviewed = true
             tx.installments = plan.total   // 1 = single charge; 2+ = MSI (amount is the total)
+            tx.reimbursementStatus = reimbursementStatus.rawValue
+            tx.reimbursementNote = reimbursementStatus == .personal
+                ? ""
+                : reimbursementNote.trimmingCharacters(in: .whitespacesAndNewlines)
+            tx.personalShareAmount = 0
         }
         dismiss()
     }

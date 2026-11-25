@@ -30,9 +30,13 @@ Tabularium/
 │   │   ├── DashboardView.swift       # nav, header, list/chart, day groups,     ✅
 │   │   │                             # drag & drop PDF import entry point
 │   │   ├── AddTransactionSheet.swift                                          ✅
+│   │   ├── CategoryDropdownPicker.swift # popover dropdown with inline          ✅
+│   │   │                             # "+ Add category" (emoji + name editor)
 │   │   ├── DayGridPicker.swift       # big always-visible month calendar for   ✅
 │   │   │                             # the Add/Edit sheets' date
 │   │   ├── EditTransactionSheet.swift                                         ✅
+│   │   ├── ReimbursementPicker.swift # 3-option budget exclusion /              ✅
+│   │   │                             # reimbursement / split share picker
 │   │   └── TransactionFormContent.swift # shared two-column calendar + fields  ✅
 │   ├── Import/ImportView.swift       # unused placeholder — import is          ⏳
 │   │                                 # triggered by dropping onto Dashboard
@@ -73,8 +77,13 @@ Tabularium/
     │                                 # order (for DayGridPicker)
     ├── Date+Formatting.swift         # period labels + billingPeriod()         ✅
     ├── Double+Currency.swift         # "$1,234.56" formatting                  ✅
+    ├── InlineCategoryDraft.swift     # inline "+ Add category" validation &    ✅
+    │                                 # single-emoji sanitization
     ├── InstallmentPlan.swift         # MSI current/total parsing + back-dating ✅
-    └── String+Amount.swift           # amount-field input filtering            ✅
+    ├── ReimbursementOption.swift     # personal budget share vs. reimbursable  ✅
+    │                                 # math across all 3 reimbursement options
+    ├── String+Amount.swift           # amount-field input filtering            ✅
+    └── TransactionSortOrder.swift    # newest-first vs. oldest-first sorting   ✅
 ```
 
 Notes on conventions vs. reality:
